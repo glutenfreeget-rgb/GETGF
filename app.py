@@ -758,6 +758,191 @@ def page_financeiro():
             st.caption("Sem dados para o mês.")
         card_end()
 
+
+# ===================== Importar Extrato (CSV C6 / genérico) =====================
+def _read_text_guess(raw: bytes) -> str:
+    for enc in ("utf-8-sig", "latin1"):
+        try:
+            return raw.decode(enc)
+        except Exception:
+            continue
+    return raw.decode("utf-8", errors="ignore")
+
+def _parse_brl_amount(x) -> float:
+    s = str(x or "").strip().replace("R$", "").replace(" ", "")
+    if s == "" or s.lower() in {"nan", "none"}:
+        return 0.0
+    if "." in s and "," in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s and "." not in s:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+def _guess_sep(line: str) -> str:
+    best_sep, best_cols = ",", 1
+    for sep in [",", ";", "\t", "|"]:
+        cols = len(line.split(sep))
+        if cols > best_cols:
+            best_sep, best_cols = sep, cols
+    return best_sep
+
+def _load_c6_csv(raw: bytes) -> pd.DataFrame:
+    from io import StringIO
+    txt = _read_text_guess(raw)
+    lines = txt.splitlines()
+    marker = "Data Lançamento,Data Contábil,Título,Descrição,Entrada(R$),Saída(R$),Saldo do Dia(R$)"
+    start = next((i for i, ln in enumerate(lines) if marker in ln), None)
+    if start is None:
+        return pd.DataFrame()
+    csv_body = "\n".join(lines[start:])
+    df = pd.read_csv(StringIO(csv_body), sep=",", dtype=str, keep_default_na=False)
+    out = pd.DataFrame({
+        "entry_date": pd.to_datetime(df["Data Lançamento"], dayfirst=True, errors="coerce").dt.date,
+        "description": df["Descrição"].astype(str),
+    })
+    out["amount"] = df["Entrada(R$)"].apply(_parse_brl_amount) - df["Saída(R$)"].apply(_parse_brl_amount)
+    return out.dropna(subset=["entry_date"])
+
+def _load_csv_generic(raw: bytes) -> pd.DataFrame:
+    from io import StringIO
+    txt = _read_text_guess(raw)
+    if not txt:
+        return pd.DataFrame()
+    first = txt.splitlines()[0]
+    sep = _guess_sep(first)
+    df = pd.read_csv(StringIO(txt), sep=sep, dtype=str, keep_default_na=False)
+    cols = {c.lower(): c for c in df.columns}
+    entry_col = cols.get("data") or cols.get("date") or cols.get("data lançamento") or cols.get("entry_date")
+    desc_col = cols.get("descrição") or cols.get("descricao") or cols.get("description") or cols.get("histórico") or cols.get("historico")
+    # tenta amount direto
+    val_col  = cols.get("valor") or cols.get("amount")
+    # ou entrada-saida
+    ent_col  = cols.get("entrada(r$)") or cols.get("credito") or cols.get("crédito")
+    sai_col  = cols.get("saída(r$)") or cols.get("debito") or cols.get("débito")
+
+    if entry_col and desc_col and val_col:
+        out = pd.DataFrame({
+            "entry_date": pd.to_datetime(df[entry_col], dayfirst=True, errors="coerce").dt.date,
+            "description": df[desc_col].astype(str),
+            "amount": df[val_col].apply(_parse_brl_amount)
+        })
+        return out.dropna(subset=["entry_date"])
+
+    if entry_col and desc_col and ent_col and sai_col:
+        out = pd.DataFrame({
+            "entry_date": pd.to_datetime(df[entry_col], dayfirst=True, errors="coerce").dt.date,
+            "description": df[desc_col].astype(str),
+        })
+        out["amount"] = df[ent_col].apply(_parse_brl_amount) - df[sai_col].apply(_parse_brl_amount)
+        return out.dropna(subset=["entry_date"])
+
+    return pd.DataFrame()
+
+def _load_bank_file(up) -> pd.DataFrame:
+    raw = up.read()
+    txt = _read_text_guess(raw)
+    if "Data Lançamento,Data Contábil,Título,Descrição,Entrada(R$),Saída(R$),Saldo do Dia(R$)" in txt:
+        df = _load_c6_csv(raw)
+        if not df.empty:
+            return df
+    return _load_csv_generic(raw)
+
+def _find_duplicates(df: pd.DataFrame) -> pd.Series:
+    if df.empty:
+        return pd.Series([], dtype=bool)
+    rows = qall("""
+        select entry_date, amount, description
+          from resto.cashbook
+         where entry_date >= (current_date - interval '365 days')
+    """)
+    base = pd.DataFrame(rows)
+    if base.empty:
+        return pd.Series([False]*len(df))
+
+    base["key"] = (
+        pd.to_datetime(base["entry_date"]).astype(str)
+        + "|" + base["amount"].astype(float).round(2).astype(str)
+        + "|" + base["description"].astype(str).str.lower().str.slice(0, 50)
+    )
+    df2 = df.copy()
+    df2["key"] = (
+        pd.to_datetime(df2["entry_date"]).astype(str)
+        + "|" + df2["amount"].astype(float).round(2).astype(str)
+        + "|" + df2["description"].astype(str).str.lower().str.slice(0, 50)
+    )
+    return df2["key"].isin(set(base["key"]))
+
+def page_importar_extrato():
+    header("🏦 Importar Extrato (CSV)", "Modelo C6 ou CSV genérico com data/descrição/valor.")
+    card_start()
+    st.subheader("1) Selecione o arquivo")
+    up = st.file_uploader("CSV do banco", type=["csv"])
+    if not up:
+        st.info("Dica: o CSV do C6 com cabeçalho 'Data Lançamento, Data Contábil, ...' é detectado automaticamente.")
+        card_end()
+        return
+
+    df = _load_bank_file(up)
+    if df.empty or not set(df.columns) >= {"entry_date","description","amount"}:
+        st.error("Não consegui reconhecer o layout (preciso de: data, descrição, valor).")
+        card_end()
+        return
+
+    st.success(f"Arquivo reconhecido. {len(df)} linhas.")
+    st.dataframe(df.head(100), use_container_width=True, hide_index=True)
+
+    st.subheader("2) Ajustes e classificação")
+    cats = qall("select id, name, kind from resto.cash_category order by name;")
+    if not cats:
+        st.warning("Nenhuma categoria encontrada. Crie categorias em **Financeiro → Livro caixa** antes de importar.")
+        card_end()
+        return
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        default_cat_in = st.selectbox("Categoria padrão para ENTRADAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='IN'],
+                                      format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    with col2:
+        default_cat_out = st.selectbox("Categoria padrão para SAÍDAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='OUT'],
+                                       format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    with col3:
+        method = st.selectbox("Método (aplicar em todos)", ['dinheiro','pix','cartão débito','cartão crédito','boleto','outro'])
+
+    # Define coluna kind e category_id por sinal do valor
+    out = df.copy()
+    out["kind"] = out["amount"].apply(lambda v: "IN" if float(v) >= 0 else "OUT")
+    out["category_id"] = out["kind"].apply(lambda k: default_cat_in[0] if k=="IN" else default_cat_out[0])
+
+    # Duplicados (últimos 12 meses)
+    out["duplicado?"] = _find_duplicates(out)
+
+    st.subheader("3) Conferência")
+    st.dataframe(out.head(100), use_container_width=True, hide_index=True)
+    st.info(f"Detectados **{int(out['duplicado?'].sum())}** possíveis duplicados (mesma data, valor e início da descrição). Eles não serão importados.")
+
+    st.subheader("4) Importar")
+    prontos = out[~out["duplicado?"]].copy()
+    st.markdown(f"Prontos para importar: **{len(prontos)}**")
+
+    with st.form("form_import"):
+        confirma = st.checkbox("Confirmo que revisei os dados e desejo importar os lançamentos.")
+        go = st.form_submit_button(f"🚀 Importar {len(prontos)} lançamentos")
+
+    if go and confirma:
+        ok = 0
+        for _, r in prontos.iterrows():
+            qexec("""
+                insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
+                values (%s, %s, %s, %s, %s, %s);
+            """, (str(r["entry_date"]), r["kind"], int(r["category_id"]), str(r["description"])[:300], float(r["amount"]), method))
+            ok += 1
+        st.success(f"Importados {ok} lançamentos no livro-caixa!")
+    card_end()
+
+
 # ===================== Router =====================
 def main():
     if not ensure_ping():
@@ -765,7 +950,7 @@ def main():
     ensure_migrations()
 
     header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")
-    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro"], index=0)
+    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro", "Importar Extrato"], index=0)
 
     if page == "Painel": page_dashboard()
     elif page == "Cadastros": page_cadastros()
@@ -775,6 +960,7 @@ def main():
     elif page == "Produção": page_producao()
     elif page == "Estoque": page_estoque()
     elif page == "Financeiro": page_financeiro()
+    elif page == "Importar Extrato": page_importar_extrato()
 
 if __name__ == "__main__":
     main()
