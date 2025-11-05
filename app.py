@@ -944,6 +944,7 @@ def _find_duplicates(df: pd.DataFrame) -> pd.Series:
 
 
 
+
 def page_importar_extrato():
     header("🏦 Importar Extrato (CSV)", "Modelo C6 ou CSV genérico com data/descrição/valor.")
     card_start()
@@ -953,7 +954,88 @@ def page_importar_extrato():
         card_end()
         return
 
-    up = st.file_uploader("CSV do banco", type=["csv"], key="bank_file")
+    up = st.file_uploader("CSV do banco", type=["csv"], key="import_extrato_file")
+    if not up:
+        st.info("Dica: o CSV do C6 com cabeçalho 'Data Lançamento, Data Contábil, ...' é detectado automaticamente.")
+        card_end()
+        return
+
+    df = _load_bank_file(up)
+    if df.empty or not set(df.columns) >= {"entry_date","description","amount"}:
+        st.error("Não consegui reconhecer o layout (preciso de: data, descrição, valor).")
+        card_end()
+        return
+
+    st.success(f"Arquivo reconhecido. {len(df)} linhas.")
+    st.dataframe(df.head(100), use_container_width=True, hide_index=True)
+
+    st.subheader("2) Ajustes e classificação")
+    cats = qall("select id, name, kind from resto.cash_category order by name;")
+    if not cats:
+        st.warning("Nenhuma categoria encontrada. Crie categorias em **Financeiro → Livro caixa** antes de importar.")
+        card_end()
+        return
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        default_cat_in = st.selectbox("Categoria padrão para ENTRADAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='IN'],
+                                      format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    with col2:
+        default_cat_out = st.selectbox("Categoria padrão para SAÍDAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='OUT'],
+                                       format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    with col3:
+        method_override = st.selectbox(
+            "Método (opcional — deixe em auto p/ detectar por descrição)",
+            options=["— auto por descrição —","dinheiro","pix","cartão débito","cartão crédito","boleto","transferência","outro"],
+            index=0
+        )
+
+    # Define coluna kind e category_id por sinal do valor
+    out = df.copy()
+    out["kind"] = out["amount"].apply(lambda v: "IN" if float(v) >= 0 else "OUT")
+    out["category_id"] = out["kind"].apply(lambda k: default_cat_in[0] if k=="IN" else default_cat_out[0])
+    # método por linha (auto por descrição)
+    try:
+        out["method"] = out["description"].apply(_guess_method_from_desc)
+    except NameError:
+        out["method"] = "outro"
+    # override global opcional
+    if method_override != "— auto por descrição —":
+        map_override = {"dinheiro":"dinheiro","pix":"pix","cartão débito":"cartão débito","cartão crédito":"cartão crédito","boleto":"boleto","transferência":"transferência","outro":"outro"}
+        out["method"] = map_override.get(method_override, "outro")
+
+    # Duplicados (últimos 12 meses)
+    out["duplicado?"] = _find_duplicates(out)
+
+    st.subheader("3) Conferência")
+    st.dataframe(out.head(100), use_container_width=True, hide_index=True)
+    st.info(f"Detectados **{int(out['duplicado?'].sum())}** possíveis duplicados (mesma data, valor e início da descrição). Eles não serão importados.")
+
+    st.subheader("4) Importar")
+    prontos = out[~out["duplicado?"]].copy()
+    st.markdown(f"Prontos para importar: **{len(prontos)}**")
+
+    with st.form("form_import"):
+        confirma = st.checkbox("Confirmo que revisei os dados e desejo importar os lançamentos.")
+        go = st.form_submit_button(f"🚀 Importar {len(prontos)} lançamentos")
+
+    if go and confirma and not st.session_state["import_lock"]:
+        st.session_state["import_lock"] = True
+        ok = 0
+        for _, r in prontos.iterrows():
+            qexec("""
+                insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
+                values (%s, %s, %s, %s, %s, %s)
+                on conflict do nothing;
+            """, (str(r["entry_date"]), r["kind"], int(r["category_id"]), str(r["description"])[:300], float(r["amount"]), r.get("method") or "outro"))
+            ok += 1
+        st.session_state["import_lock"] = False
+        st.session_state["import_extrato_file"] = None
+        st.success(f"Importados {ok} lançamentos no livro-caixa!")
+    card_end()
+
+
+    up = st.file_uploader("CSV do banco", type=["csv"], key="import_extrato_file")
     if not up:
         st.info("Dica: o CSV do C6 com cabeçalho 'Data Lançamento, Data Contábil, ...' é detectado automaticamente.")
         card_end()
@@ -1031,7 +1113,7 @@ def page_importar_extrato():
     card_end()
 
 
-    up = st.file_uploader("CSV do banco", type=["csv"], key="bank_file")
+    up = st.file_uploader("CSV do banco", type=["csv"], key="import_extrato_file")
     if not up:
         st.info("Dica: o CSV do C6 com cabeçalho 'Data Lançamento,Data Contábil, ...' é detectado automaticamente.")
         card_end()
