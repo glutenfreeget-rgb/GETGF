@@ -140,73 +140,263 @@ def ensure_ping():
         return False
 
 # ===================== MIGRAÇÕES =====================
+
 def ensure_migrations_core():
-    # schema e índices auxiliares básicos desta entrega
+    # --- Schema base ---
     qexec("create schema if not exists resto;")
-    # Função de movimento de estoque (se não existir)
+
+    # --- Tabelas básicas ---
     qexec("""
-    do $$
+    create table if not exists resto.unit (
+      id bigserial primary key,
+      name text not null,
+      abbr text not null unique,
+      base_hint text
+    );
+    """)
+
+    qexec("""
+    create table if not exists resto.category (
+      id bigserial primary key,
+      name text not null unique
+    );
+    """)
+
+    qexec("""
+    create table if not exists resto.supplier (
+      id bigserial primary key,
+      name text not null unique,
+      cnpj text,
+      ie   text,
+      email text,
+      phone text
+    );
+    """)
+
+    qexec("""
+    create table if not exists resto.product (
+      id bigserial primary key,
+      code text,
+      name text not null unique,
+      category_id bigint references resto.category(id),
+      unit_id bigint references resto.unit(id),
+      stock_qty numeric(18,6) not null default 0,
+      avg_cost  numeric(18,6) not null default 0,
+      last_cost numeric(18,6) not null default 0,
+      ncm text, cest text, cfop_venda text, csosn text,
+      cst_icms text, aliquota_icms numeric(8,4),
+      cst_pis text, aliquota_pis numeric(8,4),
+      cst_cofins text, aliquota_cofins numeric(8,4),
+      iss_aliquota numeric(8,4),
+      is_sale_item boolean not null default false,
+      is_ingredient boolean not null default false,
+      default_markup numeric(10,2) not null default 0
+    );
+    """)
+
+    qexec("""
+    create table if not exists resto.purchase (
+      id bigserial primary key,
+      supplier_id bigint references resto.supplier(id),
+      doc_number text,
+      cfop_entrada text,
+      doc_date date not null,
+      freight_value numeric(18,6) not null default 0,
+      other_costs  numeric(18,6) not null default 0,
+      total        numeric(18,6) not null default 0,
+      status text not null default 'LANÇADA'
+    );
+    """)
+
+    qexec("""
+    create table if not exists resto.purchase_item (
+      id bigserial primary key,
+      purchase_id bigint not null references resto.purchase(id) on delete cascade,
+      product_id  bigint not null references resto.product(id),
+      qty numeric(18,6) not null,
+      unit_id bigint references resto.unit(id),
+      unit_price numeric(18,6) not null default 0,
+      discount   numeric(18,6) not null default 0,
+      total      numeric(18,6) not null default 0,
+      lot_number text,
+      expiry_date date
+    );
+    """)
+
+    qexec("""
+    create table if not exists resto.inventory_movement (
+      id bigserial primary key,
+      move_date timestamptz not null default now(),
+      kind text not null check (kind in ('IN','OUT')),
+      product_id bigint not null references resto.product(id),
+      qty numeric(18,6) not null,
+      unit_cost numeric(18,6),
+      total_cost numeric(18,6),
+      reason text,
+      reference_id bigint,
+      note text
+    );
+    """)
+
+    qexec("""
+    create table if not exists resto.sale (
+      id bigserial primary key,
+      date date not null,
+      total numeric(18,6) not null default 0,
+      status text not null
+    );
+    """)
+
+    qexec("""
+    create table if not exists resto.sale_item (
+      id bigserial primary key,
+      sale_id bigint not null references resto.sale(id) on delete cascade,
+      product_id bigint not null references resto.product(id),
+      qty numeric(18,6) not null,
+      unit_price numeric(18,6) not null default 0,
+      total numeric(18,6) not null default 0
+    );
+    """)
+
+    qexec("""
+    create table if not exists resto.recipe (
+      id bigserial primary key,
+      product_id bigint not null unique references resto.product(id),
+      yield_qty numeric(18,6) not null,
+      yield_unit_id bigint references resto.unit(id),
+      overhead_pct numeric(8,4) not null default 0,
+      loss_pct     numeric(8,4) not null default 0
+    );
+    """)
+
+    qexec("""
+    create table if not exists resto.recipe_item (
+      id bigserial primary key,
+      recipe_id bigint not null references resto.recipe(id) on delete cascade,
+      ingredient_id bigint not null references resto.product(id),
+      qty numeric(18,6) not null,
+      unit_id bigint references resto.unit(id),
+      conversion_factor numeric(18,6) default 1
+    );
+    """)
+
+    qexec("""
+    create table if not exists resto.cash_category (
+      id bigserial primary key,
+      name text not null unique,
+      kind text not null check (kind in ('IN','OUT'))
+    );
+    """)
+
+    qexec("""
+    create table if not exists resto.cashbook (
+      id bigserial primary key,
+      entry_date date not null,
+      kind text not null check (kind in ('IN','OUT')),
+      category_id bigint references resto.cash_category(id),
+      description text,
+      amount numeric(18,6) not null,
+      method text
+    );
+    """)
+
+    # --- Views úteis ---
+    qexec("""
+    create or replace view resto.v_stock as
+    select p.id as product_id, p.name,
+           coalesce(p.stock_qty,0) as stock_qty,
+           coalesce(p.avg_cost,0)  as avg_cost,
+           coalesce(p.stock_qty,0)*coalesce(p.avg_cost,0) as stock_value
+      from resto.product p;
+    """)
+
+    qexec("""
+    create or replace view resto.v_cmv as
+    select date_trunc('month', move_date)::date as month,
+           coalesce(sum(case when kind='OUT' then total_cost end),0) as cmv_value
+      from resto.inventory_movement
+     group by 1
+     order by 1 desc;
+    """)
+
+    qexec("""
+    create or replace view resto.v_recipe_cost as
+    select r.product_id,
+           (sum(coalesce(ri.qty,0)*coalesce(ri.conversion_factor,1)*coalesce(p.avg_cost,0))
+             * (1 + coalesce(r.overhead_pct,0)/100.0)
+             * (1 + coalesce(r.loss_pct,0)/100.0)
+           ) as batch_cost,
+           case when coalesce(r.yield_qty,0) > 0
+                then (
+                  sum(coalesce(ri.qty,0)*coalesce(ri.conversion_factor,1)*coalesce(p.avg_cost,0))
+                  * (1 + coalesce(r.overhead_pct,0)/100.0)
+                  * (1 + coalesce(r.loss_pct,0)/100.0)
+                ) / r.yield_qty
+                else null end as unit_cost_estimated
+      from resto.recipe r
+      left join resto.recipe_item ri on ri.recipe_id = r.id
+      left join resto.product p on p.id = ri.ingredient_id
+     group by r.product_id, r.yield_qty, r.overhead_pct, r.loss_pct;
+    """)
+
+    # --- Índices úteis ---
+    qexec("create index if not exists invmov_ref_idx on resto.inventory_movement(reference_id);")
+
+    # --- Função de movimentos (cria/atualiza sempre) ---
+    qexec(r\"""
+    create or replace function resto.sp_register_movement(
+      p_product_id bigint,
+      p_kind text,
+      p_qty numeric,
+      p_unit_cost numeric,
+      p_reason text,
+      p_reference_id bigint,
+      p_note text
+    ) returns void
+    language plpgsql
+    as $$
+    declare
+      v_prev_qty numeric := 0;
+      v_prev_avg numeric := 0;
+      v_unit_cost numeric := 0;
     begin
-      if not exists (
-        select 1 from pg_proc p
-        join pg_namespace n on n.oid = p.pronamespace
-        where p.proname = 'sp_register_movement' and n.nspname = 'resto'
-      ) then
-        execute $$
-        create or replace function resto.sp_register_movement(
-          p_product_id bigint,
-          p_kind text,
-          p_qty numeric,
-          p_unit_cost numeric,
-          p_reason text,
-          p_reference_id bigint,
-          p_note text
-        ) returns void
-        language plpgsql
-        as $$
-        declare
-          v_prev_qty numeric := 0;
-          v_prev_avg numeric := 0;
-          v_unit_cost numeric := 0;
-        begin
-          select coalesce(stock_qty,0), coalesce(avg_cost,0)
-            into v_prev_qty, v_prev_avg
-            from resto.product where id = p_product_id
-            for update;
+      select coalesce(stock_qty,0), coalesce(avg_cost,0)
+        into v_prev_qty, v_prev_avg
+        from resto.product where id = p_product_id
+        for update;
 
-          if p_unit_cost is null then
-            v_unit_cost := v_prev_avg;
-          else
-            v_unit_cost := p_unit_cost;
-          end if;
+      if p_unit_cost is null then
+        v_unit_cost := v_prev_avg;
+      else
+        v_unit_cost := p_unit_cost;
+      end if;
 
-          if p_kind = 'IN' then
-            insert into resto.inventory_movement(move_date, kind, product_id, qty, unit_cost, total_cost, reason, reference_id, note)
-            values (now(), 'IN', p_product_id, p_qty, v_unit_cost, p_qty * v_unit_cost, p_reason, p_reference_id, p_note);
+      if p_kind = 'IN' then
+        insert into resto.inventory_movement(move_date, kind, product_id, qty, unit_cost, total_cost, reason, reference_id, note)
+        values (now(), 'IN', p_product_id, p_qty, v_unit_cost, p_qty * v_unit_cost, p_reason, p_reference_id, p_note);
 
-            update resto.product
-               set stock_qty = coalesce(stock_qty,0) + p_qty,
-                   last_cost = v_unit_cost,
-                   avg_cost = case when coalesce(stock_qty,0)+p_qty > 0
-                                   then ((coalesce(stock_qty,0)*coalesce(avg_cost,0)) + (p_qty*v_unit_cost)) / (coalesce(stock_qty,0)+p_qty)
-                                   else coalesce(avg_cost,0) end
-             where id = p_product_id;
+        update resto.product
+           set stock_qty = coalesce(stock_qty,0) + p_qty,
+               last_cost = v_unit_cost,
+               avg_cost = case when coalesce(stock_qty,0)+p_qty > 0
+                               then ((coalesce(stock_qty,0)*coalesce(avg_cost,0)) + (p_qty*v_unit_cost)) / (coalesce(stock_qty,0)+p_qty)
+                               else coalesce(avg_cost,0) end
+         where id = p_product_id;
 
-          elsif p_kind = 'OUT' then
-            insert into resto.inventory_movement(move_date, kind, product_id, qty, unit_cost, total_cost, reason, reference_id, note)
-            values (now(), 'OUT', p_product_id, p_qty, v_unit_cost, p_qty * v_unit_cost, p_reason, p_reference_id, p_note);
+      elsif p_kind = 'OUT' then
+        insert into resto.inventory_movement(move_date, kind, product_id, qty, unit_cost, total_cost, reason, reference_id, note)
+        values (now(), 'OUT', p_product_id, p_qty, v_unit_cost, p_qty * v_unit_cost, p_reason, p_reference_id, p_note);
 
-            update resto.product
-               set stock_qty = coalesce(stock_qty,0) - p_qty
-             where id = p_product_id;
-          else
-            raise exception 'Invalid kind %', p_kind;
-          end if;
-        end $$;
-        $$;
+        update resto.product
+           set stock_qty = coalesce(stock_qty,0) - p_qty
+         where id = p_product_id;
+      else
+        raise exception 'Invalid kind %', p_kind;
       end if;
     end $$;
-    """)
+    \""")
+
+
 
 def ensure_migrations_production():
     # Produção (ordem de produção) e índice útil
@@ -280,6 +470,20 @@ def ensure_migrations():
     ensure_migrations_cash_import()
 
 # ===================== UI Helpers =====================
+
+# Safe selectbox helper: never breaks when options list is empty
+def S(label, options, **kwargs):
+    if not options:
+        # show a disabled placeholder so Streamlit doesn't raise "options cannot be empty"
+        kwargs = dict(kwargs)
+        kwargs["disabled"] = True
+        fmt = kwargs.get("format_func")
+        # Default format for tuple options -> show second element
+        if fmt is None:
+            kwargs["format_func"] = lambda x: (x[1] if isinstance(x, tuple) and len(x) > 1 else (x if x not in (None, "") else "—"))
+        return S(label, options=[("", "—")], **kwargs)
+    return S(label, options=options, **kwargs)
+
 def header(title: str, subtitle: Optional[str] = None):
     st.markdown(
         f"<div class='modern-header'><h2 style='margin:0'>{title}</h2>" +
@@ -457,8 +661,8 @@ def page_cadastros():
         with st.form("form_prod"):
             code = st.text_input("Código interno")
             name = st.text_input("Nome *")
-            category_id = st.selectbox("Categoria", options=[(c['id'], c['name']) for c in cats] if cats else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if cats else None)
-            unit_id = st.selectbox("Unidade *", options=[(u['id'], u['abbr']) for u in units] if units else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if units else None)
+            category_id = S("Categoria", options=[(c['id'], c['name']) for c in cats] if cats else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if cats else None)
+            unit_id = S("Unidade *", options=[(u['id'], u['abbr']) for u in units] if units else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if units else None)
 
             st.markdown("**Campos fiscais (opcional)**")
             colf1, colf2, colf3, colf4 = st.columns(4)
@@ -514,7 +718,7 @@ def page_compras():
 
     card_start()
     with st.form("form_compra"):
-        supplier = st.selectbox("Fornecedor *", options=[(s['id'], s['name']) for s in suppliers] if suppliers else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+        supplier = S("Fornecedor *", options=[(s['id'], s['name']) for s in suppliers] if suppliers else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
         doc_number = st.text_input("Número do documento")
         cfop_ent = st.text_input("CFOP Entrada", value="1102")
         doc_date = st.date_input("Data", value=date.today())
@@ -526,8 +730,8 @@ def page_compras():
             st.session_state["compra_itens"] = []
 
         with st.expander("Adicionar item", expanded=True):
-            prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods] if prods else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-            unit = st.selectbox("Unidade", options=[(u['id'], u['abbr']) for u in units] if units else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+            prod = S("Produto", options=[(p['id'], p['name']) for p in prods] if prods else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+            unit = S("Unidade", options=[(u['id'], u['abbr']) for u in units] if units else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
             qty = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1)
             unit_price = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01)
             discount = st.number_input("Desconto", 0.0, 1_000_000.0, 0.0, 0.01)
@@ -591,7 +795,7 @@ def page_vendas():
             st.session_state["sale_itens"] = []
 
         with st.expander("Adicionar item", expanded=True):
-            prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods] if prods else [],
+            prod = S("Produto", options=[(p['id'], p['name']) for p in prods] if prods else [],
                                 format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="sale_prod")
             qty = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1, key="sale_qty")
             price = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01, key="sale_price")
@@ -647,14 +851,14 @@ def page_receitas_precos():
     with tab[0]:
         card_start()
         st.subheader("Ficha técnica do produto")
-        prod = st.selectbox("Produto final *", options=[(p['id'], p['name']) for p in prods] if prods else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+        prod = S("Produto final *", options=[(p['id'], p['name']) for p in prods] if prods else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
         if prod:
             recipe = safe_qone("select * from resto.recipe where product_id=%s;", (prod[0],))
             if not recipe:
                 st.info("Sem receita ainda. Preencha para criar.")
                 with st.form("form_new_recipe"):
                     yield_qty = st.number_input("Rendimento (quantidade)", 0.0, 1_000_000.0, 10.0, 0.1)
-                    yield_unit = st.selectbox("Unidade do rendimento", options=[(u['id'], u['abbr']) for u in units] if units else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+                    yield_unit = S("Unidade do rendimento", options=[(u['id'], u['abbr']) for u in units] if units else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
                     overhead = st.number_input("Custo indireto % (gás/energia/mão de obra)", 0.0, 999.0, 0.0, 0.1)
                     loss = st.number_input("Perdas %", 0.0, 100.0, 0.0, 0.1)
                     ok = st.form_submit_button("Criar ficha técnica")
@@ -669,9 +873,9 @@ def page_receitas_precos():
                 unit_abbr = unit_abbr['abbr'] if unit_abbr else '?'
                 st.caption(f"Rende {recipe['yield_qty']} {unit_abbr} | Indiretos: {recipe['overhead_pct']}% | Perdas: {recipe['loss_pct']}% ")
                 with st.expander("Adicionar ingrediente"):
-                    ing = st.selectbox("Ingrediente", options=[(p['id'], p['name']) for p in prods] if prods else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="ing_sel")
+                    ing = S("Ingrediente", options=[(p['id'], p['name']) for p in prods] if prods else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="ing_sel")
                     qty = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1, key="ing_qty")
-                    unit = st.selectbox("Unidade", options=[(u['id'], u['abbr']) for u in units] if units else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="ing_unit")
+                    unit = S("Unidade", options=[(u['id'], u['abbr']) for u in units] if units else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="ing_unit")
                     conv = st.number_input("Fator de conversão (opcional)", 0.0, 1_000_000.0, 1.0, 0.01, help="Ex: 1 colher = 15 ml → use 15 se seu estoque estiver em ml.")
                     add = st.button("Adicionar ingrediente", key="ing_add")
                     if add and ing and qty>0 and unit:
@@ -701,7 +905,7 @@ def page_receitas_precos():
     with tab[1]:
         card_start()
         st.subheader("Simulador de Preço de Venda")
-        prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods] if prods else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="prec_prod")
+        prod = S("Produto", options=[(p['id'], p['name']) for p in prods] if prods else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="prec_prod")
         if prod:
             rec = safe_qone("select unit_cost_estimated from resto.v_recipe_cost where product_id=%s;", (prod[0],))
             avg = safe_qone("select avg_cost from resto.product where id=%s;", (prod[0],))
@@ -731,7 +935,7 @@ def page_producao():
 
     card_start()
     st.subheader("Nova produção")
-    prod = st.selectbox("Produto final *", options=[(p['id'], p['name']) for p in prods] if prods else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    prod = S("Produto final *", options=[(p['id'], p['name']) for p in prods] if prods else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
     if not prod:
         card_end()
         return
@@ -887,11 +1091,11 @@ def page_financeiro():
 
         with st.form("form_caixa"):
             dt = st.date_input("Data", value=date.today())
-            cat = st.selectbox("Categoria", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats] if cats else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+            cat = S("Categoria", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats] if cats else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
             kind = 'IN' if (cat and '(IN)' in cat[1]) else 'OUT'
             desc = st.text_input("Descrição")
             val  = st.number_input("Valor", 0.00, 1_000_000.00, 0.00, 0.01)
-            method = st.selectbox("Forma de pagamento", ['dinheiro','pix','cartão débito','cartão crédito','boleto','outro'])
+            method = S("Forma de pagamento", ['dinheiro','pix','cartão débito','cartão crédito','boleto','outro'])
             ok = st.form_submit_button("Lançar")
         if ok and val>0 and cat:
             qexec("insert into resto.cashbook(entry_date, kind, category_id, description, amount, method) values (%s,%s,%s,%s,%s,%s);", (dt, kind, cat[0], desc, val, method))
@@ -1114,12 +1318,12 @@ def page_importar_extrato():
     cats = safe_qall("select id, name, kind from resto.cash_category order by name;")
     col1, col2, col3 = st.columns(3)
     with col1:
-        sel_cat = st.selectbox("Atribuir categoria (opcional)", options=[(None,"— manter classificação —")] + ([(c['id'], c['name']) for c in cats] if cats else []),
+        sel_cat = S("Atribuir categoria (opcional)", options=[(None,"— manter classificação —")] + ([(c['id'], c['name']) for c in cats] if cats else []),
                                format_func=lambda x: x[1] if isinstance(x, tuple) else x)
     with col2:
-        sel_kind = st.selectbox("Atribuir tipo (opcional)", options=["— manter —","IN","OUT"], index=0)
+        sel_kind = S("Atribuir tipo (opcional)", options=["— manter —","IN","OUT"], index=0)
     with col3:
-        sel_method = st.selectbox("Atribuir método (opcional)", options=["","pix","dinheiro","cartão débito","cartão crédito","boleto","transferência","outro"], index=0)
+        sel_method = S("Atribuir método (opcional)", options=["","pix","dinheiro","cartão débito","cartão crédito","boleto","transferência","outro"], index=0)
 
     if st.checkbox("Aplicar ajustes acima a todos os itens prontos para importação"):
         if isinstance(sel_cat, tuple) and sel_cat[0]:
