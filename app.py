@@ -1,58 +1,11 @@
 
-# --- DB driver adapter: usa psycopg 3; cai para psycopg2 se faltar ---
-try:
-    import psycopg
-    from psycopg.rows import dict_row
-    DRIVER = "pg3"
-except ImportError:
-    import psycopg2
-    import psycopg2.extras
-    DRIVER = "pg2"
+import os
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Tuple
 
-def _get_conn():
-    import os
-    host = os.getenv("DB_HOST", "")
-    port = os.getenv("DB_PORT", "5432")
-    user = os.getenv("DB_USER", "")
-    pwd  = os.getenv("DB_PASSWORD", "")
-    db   = os.getenv("DB_NAME", "")
-    ssl  = os.getenv("DB_SSLMODE", "require")
-    if DRIVER == "pg3":
-        return psycopg.connect(
-            host=host, port=port, user=user, password=pwd, dbname=db,
-            sslmode=ssl, autocommit=True, row_factory=dict_row
-        )
-    else:
-        conn = psycopg2.connect(host=host, port=port, user=user, password=pwd, dbname=db, sslmode=ssl)
-        conn.autocommit = True
-        return conn
-
-def qall(sql, params=None):
-    with _get_conn() as con:
-        if DRIVER == "pg3":
-            with con.cursor() as cur:
-                cur.execute(sql, params or ())
-                return cur.fetchall()
-        else:
-            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, params or ())
-                return cur.fetchall()
-
-def qone(sql, params=None):
-    rows = qall(sql, params)
-    return rows[0] if rows else None
-
-def qexec(sql, params=None):
-    with _get_conn() as con:
-        if DRIVER == "pg3":
-            with con.cursor() as cur:
-                cur.execute(sql, params or ())
-                return cur.rowcount or 0
-        else:
-            with con.cursor() as cur:
-                cur.execute(sql, params or ())
-                return cur.rowcount or 0
-
+import pandas as pd
+import psycopg, psycopg.rows
+import streamlit as st
 
 # ===================== CONFIG =====================
 st.set_page_config(
