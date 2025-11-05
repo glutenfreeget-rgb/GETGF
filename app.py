@@ -81,6 +81,7 @@ def qone(sql: str, params: Optional[Tuple]=None) -> Optional[Dict[str, Any]]:
         cur.execute(sql, params or ())
         return cur.fetchone()
 
+
 def qexec(sql: str, params=None):
     with _get_conn() as con:
         with con.cursor() as cur:
@@ -89,7 +90,6 @@ def qexec(sql: str, params=None):
             else:
                 cur.execute(sql, params)
             return cur.rowcount or 0
-
 
 # ===================== Ensure & Migrations =====================
 def ensure_ping():
@@ -985,18 +985,28 @@ def page_importar_extrato():
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        default_cat_in = st.selectbox("Categoria padrão para ENTRADAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='IN'],
-                                      format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+        default_cat_in = st.selectbox(
+            "Categoria padrão para ENTRADAS",
+            options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='IN'],
+            format_func=lambda x: x[1] if isinstance(x, tuple) else x
+        )
     with col2:
-        default_cat_out = st.selectbox("Categoria padrão para SAÍDAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='OUT'],
-                                       format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+        default_cat_out = st.selectbox(
+            "Categoria padrão para SAÍDAS",
+            options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='OUT'],
+            format_func=lambda x: x[1] if isinstance(x, tuple) else x
+        )
     with col3:
-        method = st.selectbox("Método (opcional — deixe em auto p/ detectar por descrição)", ['— auto por descrição —','dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro'])
+        method = st.selectbox(
+            "Método (opcional — deixe em auto p/ detectar por descrição)",
+            ['— auto por descrição —','dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro']
+        )
 
     # Define coluna kind e category_id por sinal do valor
     out = df.copy()
     out["kind"] = out["amount"].apply(lambda v: "IN" if float(v) >= 0 else "OUT")
     out["category_id"] = out["kind"].apply(lambda k: default_cat_in[0] if k=="IN" else default_cat_out[0])
+
     # Método por linha (auto por descrição) + override opcional
     try:
         out["method"] = out["description"].apply(_guess_method_from_desc)
@@ -1005,8 +1015,7 @@ def page_importar_extrato():
     if method != "— auto por descrição —":
         out["method"] = method
 
-
-    # Duplicados (últimos 12 meses)
+    # Duplicados (últimos 12 meses) – sua lógica existente
     out["duplicado?"] = _find_duplicates(out)
 
     st.subheader("3) Conferência")
@@ -1022,15 +1031,46 @@ def page_importar_extrato():
         go = st.form_submit_button(f"🚀 Importar {len(prontos)} lançamentos")
 
     if go and confirma:
-        ok = 0
+        inserted, skipped_dup, skipped_err = 0, 0, 0
+
         for _, r in prontos.iterrows():
-            qexec("""
-                insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
-                values (%s, %s, %s, %s, %s, %s);
-            """, (str(r["entry_date"]), r["kind"], int(r["category_id"]), str(r["description"])[:300], float(r["amount"]), r.get("method") or 'outro'))
-            ok += 1
-        st.success(f"Importados {ok} lançamentos no livro-caixa!")
+            entry_date = str(r["entry_date"])
+            kind       = str(r["kind"])
+            category   = int(r["category_id"])
+            desc       = (str(r["description"]) if r.get("description") is not None else "")[:300]
+            amount     = round(float(r["amount"]), 2)
+            method_row = r.get("method") or 'outro'
+
+            # Evita UniqueViolation sem depender do nome do índice/constraint:
+            sql = """
+            insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
+            select %s, %s, %s, %s, %s, %s
+            where not exists (
+                select 1
+                  from resto.cashbook c
+                 where c.entry_date = %s
+                   and c.kind        = %s
+                   and c.description = %s
+                   and c.amount      = %s
+            );
+            """
+            params = (
+                entry_date, kind, category, desc, amount, method_row,
+                entry_date, kind, desc, amount
+            )
+
+            try:
+                rc = qexec(sql, params)  # qexec deve retornar rowcount
+                if rc and rc > 0:
+                    inserted += 1
+                else:
+                    skipped_dup += 1
+            except Exception:
+                skipped_err += 1
+
+        st.success(f"Importação finalizada: {inserted} inseridos • {skipped_dup} ignorados (duplicados) • {skipped_err} com erro.")
     card_end()
+
 
 
 # ===================== Router =====================
