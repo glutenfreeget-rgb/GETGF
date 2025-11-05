@@ -204,7 +204,7 @@ def page_dashboard():
         st.markdown("**Últimos CMVs (mensal)**")
         df = pd.DataFrame(cmv)
         if not df.empty:
-            df["month"] = pd.to_datetime(df["month"]).dt.strftime("%Y-%m")
+            df["month"] = df["month"].dt.strftime("%Y-%m")
             st.dataframe(df, use_container_width=True, hide_index=True)
         else:
             st.caption("Sem dados de CMV ainda.")
@@ -228,7 +228,7 @@ def page_cadastros():
     # ---------- Unidades ----------
     with tabs[0]:
         card_start()
-        st.subheader("Unidades de Medida")
+        st.subheader("Unidades de Medida");
         with st.form("form_unit"):
             name = st.text_input("Nome", value="Unidade")
             abbr = st.text_input("Abreviação", value="un")
@@ -237,28 +237,28 @@ def page_cadastros():
         if ok and name and abbr:
             qexec("insert into resto.unit(name, abbr, base_hint) values (%s,%s,%s) on conflict (abbr) do update set name=excluded.name, base_hint=excluded.base_hint;", (name, abbr, base_hint))
             st.success("Unidade salva!")
-        units = qall("select id, name, abbr, base_hint from resto.unit order by abbr;")
+        units = qall("select id, name, abbr, base_hint from resto.unit order by abbr;");
         st.dataframe(pd.DataFrame(units), use_container_width=True, hide_index=True)
         card_end()
 
     # ---------- Categorias ----------
     with tabs[1]:
         card_start()
-        st.subheader("Categorias")
+        st.subheader("Categorias");
         with st.form("form_cat"):
             name = st.text_input("Nome da categoria")
             ok = st.form_submit_button("Salvar categoria")
         if ok and name:
             qexec("insert into resto.category(name) values (%s) on conflict(name) do nothing;", (name,))
             st.success("Categoria salva!")
-        cats = qall("select id, name from resto.category order by name;")
+        cats = qall("select id, name from resto.category order by name;");
         st.dataframe(pd.DataFrame(cats), use_container_width=True, hide_index=True)
         card_end()
 
     # ---------- Fornecedores ----------
     with tabs[2]:
         card_start()
-        st.subheader("Fornecedores")
+        st.subheader("Fornecedores");
         with st.form("form_sup"):
             name = st.text_input("Nome *")
             cnpj = st.text_input("CNPJ")
@@ -272,14 +272,14 @@ def page_cadastros():
                 values (%s,%s,%s,%s,%s);
             """, (name, cnpj, ie, email, phone))
             st.success("Fornecedor salvo!")
-        rows = qall("select id, name, cnpj, ie, email, phone from resto.supplier order by name;")
+        rows = qall("select id, name, cnpj, ie, email, phone from resto.supplier order by name;");
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         card_end()
 
     # ---------- Produtos ----------
     with tabs[3]:
         card_start()
-        st.subheader("Produtos (Catálogo Fiscal)")
+        st.subheader("Produtos (Catálogo Fiscal)");
         units = qall("select id, abbr from resto.unit order by abbr;")
         cats  = qall("select id, name from resto.category order by name;")
 
@@ -294,14 +294,14 @@ def page_cadastros():
             with colf1:
                 ncm = st.text_input("NCM") ; cest = st.text_input("CEST")
             with colf2:
-                cfop = st.text_input("CFOP Venda") ; csosn = st.text_input("CSOSN")
+                cfop = st.text_input("CFOP Venda"); csosn = st.text_input("CSOSN")
             with colf3:
-                cst_icms = st.text_input("CST ICMS") ; ali_icms = st.number_input("Alíquota ICMS %", 0.0, 100.0, 0.0, 0.01)
+                cst_icms = st.text_input("CST ICMS"); ali_icms = st.number_input("Alíquota ICMS %", 0.0, 100.0, 0.0, 0.01)
             with colf4:
-                cst_pis = st.text_input("CST PIS") ; ali_pis = st.number_input("Alíquota PIS %", 0.0, 100.0, 0.0, 0.01)
+                cst_pis = st.text_input("CST PIS"); ali_pis = st.number_input("Alíquota PIS %", 0.0, 100.0, 0.0, 0.01)
             colf5, colf6 = st.columns(2)
             with colf5:
-                cst_cof = st.text_input("CST COFINS") ; ali_cof = st.number_input("Alíquota COFINS %", 0.0, 100.0, 0.0, 0.01)
+                cst_cof = st.text_input("CST COFINS"); ali_cof = st.number_input("Alíquota COFINS %", 0.0, 100.0, 0.0, 0.01)
             with colf6:
                 iss = st.number_input("ISS % (se serviço)", 0.0, 100.0, 0.0, 0.01)
 
@@ -329,17 +329,17 @@ def page_cadastros():
                   cst_cofins=excluded.cst_cofins, aliquota_cofins=excluded.aliquota_cofins,
                   iss_aliquota=excluded.iss_aliquota, is_sale_item=excluded.is_sale_item, is_ingredient=excluded.is_ingredient, default_markup=excluded.default_markup;
             """, (code, name, cat_id, uni_id, ncm, cest, cfop, csosn, cst_icms, ali_icms, cst_pis, ali_pis, cst_cof, ali_cof, iss, is_sale, is_ing, markup))
-            st.success("Produto salvo!")
+            st.success("Produto salvo!");
 
-        prods = qall("select id, code, name, stock_qty, avg_cost, last_cost from resto.product order by name;")
+        prods = qall("select id, code, name, stock_qty, avg_cost, last_cost from resto.product order by name;");
         st.dataframe(pd.DataFrame(prods), use_container_width=True, hide_index=True)
         card_end()
 
 def page_compras():
     header("📥 Compras", "Lançar notas e lotes com validade.")
     suppliers = qall("select id, name from resto.supplier order by name;")
-    prods = qall("select id, name, unit_id from resto.product order by name;")
-    units = qall("select id, abbr from resto.unit order by abbr;")
+    prods = qall("select id, name, unit_id from resto.product order by name;" )
+    units = qall("select id, abbr from resto.unit order by abbr;" )
 
     card_start()
     with st.form("form_compra"):
@@ -355,8 +355,8 @@ def page_compras():
             st.session_state["compra_itens"] = []
 
         with st.expander("Adicionar item"):
-            prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-            unit = st.selectbox("Unidade", options=[(u['id'], u['abbr']) for u in units], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+            prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1])
+            unit = st.selectbox("Unidade", options=[(u['id'], u['abbr']) for u in units], format_func=lambda x: x[1])
             qty = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1)
             unit_price = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01)
             discount = st.number_input("Desconto", 0.0, 1_000_000.0, 0.0, 0.01)
@@ -371,7 +371,7 @@ def page_compras():
                     "qty": qty, "unit_price": unit_price, "discount": discount,
                     "total": total, "lot_number": lote or None, "expiry_date": str(expiry) if expiry else None
                 })
-                st.success("Item adicionado!")
+                st.success("Item adicionado!" )
 
         df = pd.DataFrame(st.session_state["compra_itens"]) if st.session_state["compra_itens"] else pd.DataFrame(columns=["product_name","qty","unit_abbr","unit_price","discount","total","expiry_date"])
         st.dataframe(df, use_container_width=True, hide_index=True)
@@ -379,7 +379,8 @@ def page_compras():
         total_doc = float(df["total"].sum()) if not df.empty else 0.0
         st.markdown(f"**Total itens:** {money(total_doc)}")
 
-        submit = st.form_submit_button("Lançar compra e atualizar estoque")
+        submit = st.form_submit_button("Lançar compra e atualizar estoque" )
+
     card_end()
 
     if submit and supplier and doc_date and df is not None:
@@ -403,11 +404,11 @@ def page_compras():
             qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'purchase',%s,%s);", (it["product_id"], it["qty"], it["unit_price"], lot_id, note))
 
         st.session_state["compra_itens"] = []
-        st.success(f"Compra #{purchase_id} lançada e estoque atualizado!")
+        st.success(f"Compra #{purchase_id} lançada e estoque atualizado!" )
 
 def page_vendas():
     header("🧾 Vendas (simples)", "Registre saídas e gere CMV.")
-    prods = qall("select id, name from resto.product where is_sale_item order by name;")
+    prods = qall("select id, name from resto.product where is_sale_item order by name;" )
 
     card_start()
     with st.form("form_sale"):
@@ -416,7 +417,7 @@ def page_vendas():
             st.session_state["sale_itens"] = []
 
         with st.expander("Adicionar item"):
-            prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+            prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1])
             qty = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1)
             price = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01)
             add = st.button("Adicionar")
@@ -429,18 +430,18 @@ def page_vendas():
         total = float(df["total"].sum()) if not df.empty else 0.0
         st.markdown(f"**Total da venda:** {money(total)}")
 
-        submit = st.form_submit_button("Fechar venda e dar baixa no estoque")
+        submit = st.form_submit_button("Fechar venda e dar baixa no estoque" )
     card_end()
 
     if submit and sale_date and df is not None:
         row = qone("insert into resto.sale(date, total, status) values (%s,%s,'FECHADA') returning id;", (sale_date, total))
         sale_id = row["id"]
         for it in st.session_state["sale_itens"]:
-            qexec("insert into resto.sale_item(sale_id, product_id, qty, unit_price, total) values (%s,%s,%s,%s,%s);", (sale_id, it["product_id"], it["qty"], it["unit_price"], it["total"]))
+            qexec("insert into resto.sale_item(sale_id, product_id, qty, unit_price, total) values (%s,%s,%s,%s,%s);", (sale_id, it["product_id"], it["qty"], it["unit_price"], it["total"]) )
             # Saída usa CMP atual (sp cuidará), sem amarrar lote neste MVP de venda
             qexec("select resto.sp_register_movement(%s,'OUT',%s,null,'sale',%s,%s);", (it["product_id"], it["qty"], sale_id, ''))
         st.session_state["sale_itens"] = []
-        st.success(f"Venda #{sale_id} fechada e estoque baixado!")
+        st.success(f"Venda #{sale_id} fechada e estoque baixado!" )
 
 def page_receitas_precos():
     header("🥣 Fichas Técnicas & Precificação", "Monte receitas e calcule preço sugerido.")
@@ -453,14 +454,14 @@ def page_receitas_precos():
     with tab[0]:
         card_start()
         st.subheader("Ficha técnica do produto")
-        prod = st.selectbox("Produto final *", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+        prod = st.selectbox("Produto final *", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1])
         if prod:
             recipe = qone("select * from resto.recipe where product_id=%s;", (prod[0],))
             if not recipe:
                 st.info("Sem receita ainda. Preencha para criar.")
                 with st.form("form_new_recipe"):
                     yield_qty = st.number_input("Rendimento (quantidade)", 0.0, 1_000_000.0, 10.0, 0.1)
-                    yield_unit = st.selectbox("Unidade do rendimento", options=[(u['id'], u['abbr']) for u in units], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+                    yield_unit = st.selectbox("Unidade do rendimento", options=[(u['id'], u['abbr']) for u in units], format_func=lambda x: x[1])
                     overhead = st.number_input("Custo indireto % (gás/energia/mão de obra)", 0.0, 999.0, 0.0, 0.1)
                     loss = st.number_input("Perdas %", 0.0, 100.0, 0.0, 0.1)
                     ok = st.form_submit_button("Criar ficha técnica")
@@ -472,14 +473,14 @@ def page_receitas_precos():
             if recipe:
                 st.caption(f"Rende {recipe['yield_qty']} {qone('select abbr from resto.unit where id=%s;', (recipe['yield_unit_id'],))['abbr']} | Indiretos: {recipe['overhead_pct']}% | Perdas: {recipe['loss_pct']}% ")
                 with st.expander("Adicionar ingrediente"):
-                    ing = st.selectbox("Ingrediente", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="ing_sel")
+                    ing = st.selectbox("Ingrediente", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1], key="ing_sel")
                     qty = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1, key="ing_qty")
-                    unit = st.selectbox("Unidade", options=[(u['id'], u['abbr']) for u in units], format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="ing_unit")
+                    unit = st.selectbox("Unidade", options=[(u['id'], u['abbr']) for u in units], format_func=lambda x: x[1], key="ing_unit")
                     conv = st.number_input("Fator de conversão (opcional)", 0.0, 1_000_000.0, 1.0, 0.01, help="Ex: 1 colher = 15 ml → use 15 se seu estoque estiver em ml.")
                     add = st.button("Adicionar ingrediente", key="ing_add")
                     if add and ing and qty>0:
                         qexec("insert into resto.recipe_item(recipe_id, ingredient_id, qty, unit_id, conversion_factor) values (%s,%s,%s,%s,%s);", (recipe['id'], ing[0], qty, unit[0], conv))
-                        st.success("Ingrediente incluído!")
+                        st.success("Ingrediente incluído!" )
 
                 items = qall("""
                     select ri.id, p.name as ingrediente, ri.qty, u.abbr
@@ -502,8 +503,8 @@ def page_receitas_precos():
     # ---------- Precificação ----------
     with tab[1]:
         card_start()
-        st.subheader("Simulador de Preço de Venda")
-        prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="prec_prod")
+        st.subheader("Simulador de Preço de Venda" )
+        prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1], key="prec_prod")
         if prod:
             rec = qone("select unit_cost_estimated from resto.v_recipe_cost where product_id=%s;", (prod[0],))
             avg = qone("select avg_cost from resto.product where id=%s;", (prod[0],))
@@ -533,7 +534,7 @@ def page_producao():
 
     card_start()
     st.subheader("Nova produção")
-    prod = st.selectbox("Produto final *", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    prod = st.selectbox("Produto final *", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1])
     if not prod:
         card_end()
         return
@@ -636,14 +637,14 @@ def page_estoque():
 
     with tabs[0]:
         card_start()
-        rows = qall("select * from resto.v_stock order by name;")
+        rows = qall("select * from resto.v_stock order by name;" )
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         card_end()
 
     with tabs[1]:
         card_start()
-        st.subheader("Movimentações recentes")
-        mv = qall("select move_date, kind, product_id, qty, unit_cost, total_cost, reason, reference_id, note from resto.inventory_movement order by move_date desc limit 500;")
+        st.subheader("Movimentações recentes" )
+        mv = qall("select move_date, kind, product_id, qty, unit_cost, total_cost, reason, reference_id, note from resto.inventory_movement order by move_date desc limit 500;" )
         st.dataframe(pd.DataFrame(mv), use_container_width=True, hide_index=True)
         card_end()
 
@@ -651,7 +652,7 @@ def page_estoque():
         card_start()
         st.subheader("Alertas de validade e saldos por lote")
         dias = st.slider("Dias até o vencimento", 7, 120, 30, 1)
-        rows = qall("""
+        rows = qall(f"""
             with cons as (
               select reference_id as lot_id, coalesce(sum(qty),0) as qty_out
                 from resto.inventory_movement
@@ -677,20 +678,20 @@ def page_estoque():
         card_end()
 
 def page_financeiro():
-    header("💰 Financeiro", "Livro caixa simples e DRE.")
+    header("💰 Financeiro", "Livro caixa simples e DRE." )
     tabs = st.tabs(["Livro caixa", "DRE (simples)"])
 
     with tabs[0]:
         card_start()
-        st.subheader("Lançar entrada/saída")
-        cats = qall("select id, name, kind from resto.cash_category order by name;")
+        st.subheader("Lançar entrada/saída" )
+        cats = qall("select id, name, kind from resto.cash_category order by name;" )
         if not cats:
-            qexec("insert into resto.cash_category(name, kind) values ('Vendas', 'IN'), ('Compras', 'OUT'), ('Despesas Fixas', 'OUT'), ('Outros Recebimentos', 'IN'), ('Outros Pagamentos', 'OUT') on conflict do nothing;")
-            cats = qall("select id, name, kind from resto.cash_category order by name;")
+            qexec("insert into resto.cash_category(name, kind) values ('Vendas', 'IN'), ('Compras', 'OUT'), ('Despesas Fixas', 'OUT'), ('Outros Recebimentos', 'IN'), ('Outros Pagamentos', 'OUT') on conflict do nothing;" )
+            cats = qall("select id, name, kind from resto.cash_category order by name;" )
 
         with st.form("form_caixa"):
             dt = st.date_input("Data", value=date.today())
-            cat = st.selectbox("Categoria", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+            cat = st.selectbox("Categoria", options=[(c['id'], f\"{c['name']} ({c['kind']})\") for c in cats], format_func=lambda x: x[1])
             kind = 'IN' if '(IN)' in cat[1] else 'OUT'
             desc = st.text_input("Descrição")
             val  = st.number_input("Valor", 0.00, 1_000_000.00, 0.00, 0.01)
@@ -698,9 +699,9 @@ def page_financeiro():
             ok = st.form_submit_button("Lançar")
         if ok and val>0:
             qexec("insert into resto.cashbook(entry_date, kind, category_id, description, amount, method) values (%s,%s,%s,%s,%s,%s);", (dt, kind, cat[0], desc, val, method))
-            st.success("Lançamento registrado!")
+            st.success("Lançamento registrado!" )
 
-        df = pd.DataFrame(qall("select entry_date, kind, description, amount, method from resto.cashbook order by entry_date desc, id desc limit 500;"))
+        df = pd.DataFrame(qall("select entry_date, kind, description, amount, method from resto.cashbook order by entry_date desc, id desc limit 500;" ))
         st.dataframe(df, use_container_width=True, hide_index=True)
         card_end()
 
@@ -714,7 +715,7 @@ def page_financeiro():
             caixa_desp as (select coalesce(sum(case when kind='OUT' then amount else 0 end),0) d from resto.cashbook where date_trunc('month', entry_date)=date_trunc('month', now())),
             caixa_outros as (select coalesce(sum(case when kind='IN' then amount else 0 end),0) o from resto.cashbook where date_trunc('month', entry_date)=date_trunc('month', now()))
             select v, c, d, o, (v + o - c - d) as resultado from vendas, cmv, caixa_desp, caixa_outros;
-        """ )
+        """)
         if dre:
             st.markdown(
                 f"Receita: {money(dre['v'])}  \n"
@@ -734,7 +735,7 @@ def main():
         st.stop()
     ensure_migrations()
 
-    header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")
+    header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")    
     page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro"], index=0)
 
     if page == "Painel": page_dashboard()
