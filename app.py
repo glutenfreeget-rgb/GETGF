@@ -1,4 +1,5 @@
 
+
 import os
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -80,12 +81,18 @@ def qall(sql: str, params: Optional[Tuple]=None) -> List[Dict[str, Any]]:
     with _get_conn() as con:
         if DRIVER == "pg3":
             with con.cursor() as cur:
-                cur.execute(sql, params or ())
-                return cur.fetchall()
+                if params is None:
+                    cur.execute(sql)
+                else:
+                    cur.execute(sql, params)
+return cur.fetchall()
         else:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                cur.execute(sql, params or ())
-                return cur.fetchall()
+                if params is None:
+                    cur.execute(sql)
+                else:
+                    cur.execute(sql, params)
+return cur.fetchall()
 
 def qone(sql: str, params: Optional[Tuple]=None) -> Optional[Dict[str, Any]]:
     rows = qall(sql, params)
@@ -95,12 +102,18 @@ def qexec(sql: str, params: Optional[Tuple]=None) -> int:
     with _get_conn() as con:
         if DRIVER == "pg3":
             with con.cursor() as cur:
-                cur.execute(sql, params or ())
-                return cur.rowcount or 0
+                if params is None:
+                    cur.execute(sql)
+                else:
+                    cur.execute(sql, params)
+return cur.rowcount or 0
         else:
             with con.cursor() as cur:
-                cur.execute(sql, params or ())
-                return cur.rowcount or 0
+                if params is None:
+                    cur.execute(sql)
+                else:
+                    cur.execute(sql, params)
+return cur.rowcount or 0
 
 def safe_qall(sql: str, params: Optional[Tuple]=None) -> List[Dict[str, Any]]:
     try:
