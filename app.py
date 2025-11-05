@@ -81,10 +81,15 @@ def qone(sql: str, params: Optional[Tuple]=None) -> Optional[Dict[str, Any]]:
         cur.execute(sql, params or ())
         return cur.fetchone()
 
-def qexec(sql: str, params: Optional[Tuple]=None) -> int:
-    with _get_conn() as con, con.cursor() as cur:
-        cur.execute(sql, params or ())
-        return cur.rowcount or 0
+def qexec(sql: str, params=None):
+    with _get_conn() as con:
+        with con.cursor() as cur:
+            if params is None:
+                cur.execute(sql)
+            else:
+                cur.execute(sql, params)
+            return cur.rowcount or 0
+
 
 # ===================== Ensure & Migrations =====================
 def ensure_ping():
@@ -725,111 +730,115 @@ def page_estoque():
         card_end()
 
 def page_financeiro():
-    header("💰 Financeiro", "Livro caixa simples e DRE.")
-    tabs = st.tabs(["Livro caixa", "DRE (simples)"])
+    # ... seu cabeçalho/contadores/filtros existentes ...
 
+    # Sempre crie as abas antes de usá-las
+    tabs = st.tabs(["📒 Livro caixa", "📈 Relatórios", "⚙️ Config"])
+
+    # --- Aba 0: Livro caixa ---
     with tabs[0]:
-        card_start()
-        st.subheader("Lançar entrada/saída")
-        cats = qall("select id, name, kind from resto.cash_category order by name;")
-        if not cats:
-            qexec("insert into resto.cash_category(name, kind) values ('Vendas', 'IN'), ('Compras', 'OUT'), ('Despesas Fixas', 'OUT'), ('Outros Recebimentos', 'IN'), ('Outros Pagamentos', 'OUT') on conflict do nothing;")
-            cats = qall("select id, name, kind from resto.cash_category order by name;")
+        # (deixe aqui tudo que você já tinha: filtros, resumo, tabela, etc.)
 
-        with st.form("form_caixa"):
-            dt = st.date_input("Data", value=date.today())
-            cat = st.selectbox("Categoria", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-            kind = 'IN' if '(IN)' in cat[1] else 'OUT'
-            desc = st.text_input("Descrição")
-            val  = st.number_input("Valor", 0.00, 1_000_000.00, 0.00, 0.01)
-            method = st.selectbox("Forma de pagamento", ['— auto por descrição —','dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro'])
-            ok = st.form_submit_button("Lançar")
-        if ok and val>0:
-            qexec("insert into resto.cashbook(entry_date, kind, category_id, description, amount, method) values (%s,%s,%s,%s,%s,%s);", (dt, kind, cat[0], desc, val, method))
-            st.success("Lançamento registrado!")
+        # EXPANDER: Gerenciar lançamentos (editar / excluir)
+        with st.expander("Gerenciar lançamentos (editar / excluir)", expanded=False):
+            import pandas as pd
+            rows_cb = qall("""
+                select id, entry_date, kind, category_id, description, amount, method
+                  from resto.cashbook
+              order by entry_date desc, id desc
+              limit 500;
+            """)
+            if not rows_cb:
+                st.caption("Nenhum lançamento para gerenciar.")
+            else:
+                # Lista para escolher o lançamento
+                opts = [
+                    (int(r["id"]),
+                     f"#{r['id']} • {r['entry_date']} • {r.get('method') or ''} • "
+                     f"{str(r.get('description') or '')[:40]} • "
+                     f"{('+' if r['kind']=='IN' else '-')}{r['amount']}")
+                    for r in rows_cb
+                ]
+                sel = st.selectbox(
+                    "Selecione um lançamento",
+                    options=opts,
+                    format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+                    key="cb_mgr_select"
+                )
+                sel_id = sel[0] if sel else None
 
-        df = pd.DataFrame(qall("select entry_date, kind, description, amount, method from resto.cashbook order by entry_date desc, id desc limit 500;"))
-        st.dataframe(df, use_container_width=True, hide_index=True)
+                if sel_id:
+                    cur = next((r for r in rows_cb if int(r["id"]) == sel_id), None)
+                    if cur:
+                        cats_all = qall("select id, name, kind from resto.cash_category order by name;")
+                        colA, colB, colC = st.columns(3)
+                        with colA:
+                            new_date = st.date_input(
+                                "Data",
+                                value=pd.to_datetime(cur["entry_date"]).date(),
+                                key=f"cb_date_{sel_id}"
+                            )
+                        with colB:
+                            cat_opts = [(c['id'], f"{c['name']} ({c['kind']})") for c in cats_all]
+                            try:
+                                idx = [c[0] for c in cat_opts].index(cur.get("category_id"))
+                            except Exception:
+                                idx = 0
+                            new_cat = st.selectbox(
+                                "Categoria",
+                                options=cat_opts,
+                                index=idx,
+                                format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+                                key=f"cb_cat_{sel_id}"
+                            )
+                        with colC:
+                            methods = ['dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro']
+                            m0 = cur.get("method") or 'outro'
+                            i0 = methods.index(m0) if m0 in methods else len(methods) - 1
+                            new_method = st.selectbox(
+                                "Forma de pagamento",
+                                methods,
+                                index=i0,
+                                key=f"cb_method_{sel_id}"
+                            )
 
-with st.expander("Gerenciar lançamentos (editar / excluir)", expanded=False):
-    rows_cb = qall("select id, entry_date, kind, category_id, description, amount, method from resto.cashbook order by entry_date desc, id desc limit 500;")
-    import pandas as pd
-    if not rows_cb:
-        st.caption("Nenhum lançamento para gerenciar.")
-    else:
-        opts = [(int(r["id"]), f"#{r['id']} • {r['entry_date']} • {r.get('method') or ''} • {str(r.get('description') or '')[:40]} • {('+' if r['kind']=='IN' else '-')}{r['amount']}") for r in rows_cb]
-        sel = st.selectbox("Selecione um lançamento", options=opts, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-        if sel:
-            sel_id = sel[0]
-            cur = next((r for r in rows_cb if int(r["id"])==sel_id), None)
-            if cur:
-                cats_all = qall("select id, name, kind from resto.cash_category order by name;")
-                colA, colB, colC = st.columns(3)
-                with colA:
-                    new_date = st.date_input("Data", value=pd.to_datetime(cur["entry_date"]).date())
-                with colB:
-                    cat_opts = [(c['id'], f"{c['name']} ({c['kind']})") for c in cats_all]
-                    try:
-                        idx = [c[0] for c in cat_opts].index(cur.get("category_id"))
-                    except Exception:
-                        idx = 0
-                    new_cat = st.selectbox("Categoria", options=cat_opts, index=idx, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-                with colC:
-                    methods = ['dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro']
-                    m0 = cur.get("method") or 'outro'
-                    new_method = st.selectbox("Forma de pagamento", methods, index=(methods.index(m0) if m0 in methods else len(methods)-1))
-                new_desc = st.text_input("Descrição", value=cur.get("description") or "")
-                new_amount = st.number_input("Valor", -1_000_000.0, 1_000_000.0, float(cur.get("amount") or 0.0), 0.01)
-                new_kind = 'IN' if '(IN)' in new_cat[1] else 'OUT'
-                col1b, col2b = st.columns(2)
-                with col1b:
-                    salvar = st.button("💾 Salvar alterações", type="primary", key=f"cb_save_{sel_id}")
-                with col2b:
-                    excluir = st.button("🗑️ Excluir lançamento", type="secondary", key=f"cb_del_{sel_id}")
-                if salvar:
-                    try:
-                        qexec("""
-                        update resto.cashbook
-                           set entry_date=%s, kind=%s, category_id=%s, description=%s, amount=%s, method=%s
-                         where id=%s;
-                        """, (new_date, new_kind, int(new_cat[0]), new_desc[:300], float(new_amount), new_method, sel_id))
-                        st.success("Lançamento atualizado.")
-                        st.experimental_rerun()
-                    except Exception as e:
-                        st.error(f"Erro ao atualizar: {e}")
-                if excluir:
-                    try:
-                        qexec("delete from resto.cashbook where id=%s;", (sel_id,))
-                        st.success("Lançamento excluído.")
-                        st.experimental_rerun()
-                    except Exception as e:
-                        st.error(f"Erro ao excluir: {e}")
+                        new_desc = st.text_input("Descrição", value=cur.get("description") or "",
+                                                 key=f"cb_desc_{sel_id}")
+                        new_amount = st.number_input("Valor", -1_000_000.0, 1_000_000.0,
+                                                     float(cur.get("amount") or 0.0), 0.01,
+                                                     key=f"cb_amount_{sel_id}")
 
-        card_end()
+                        # Kind acompanha a categoria selecionada
+                        new_kind = 'IN' if '(IN)' in new_cat[1] else 'OUT'
 
+                        col1b, col2b = st.columns(2)
+                        with col1b:
+                            salvar = st.button("💾 Salvar alterações", key=f"cb_save_{sel_id}")
+                        with col2b:
+                            excluir = st.button("🗑️ Excluir lançamento", key=f"cb_del_{sel_id}")
+
+                        if salvar:
+                            qexec("""
+                                update resto.cashbook
+                                   set entry_date=%s, kind=%s, category_id=%s, description=%s, amount=%s, method=%s
+                                 where id=%s;
+                            """, (new_date, new_kind, int(new_cat[0]),
+                                  (new_desc or "")[:300], float(new_amount), new_method, sel_id))
+                            st.success("Lançamento atualizado.")
+                            st.experimental_rerun()
+
+                        if excluir:
+                            qexec("delete from resto.cashbook where id=%s;", (sel_id,))
+                            st.success("Lançamento excluído.")
+                            st.experimental_rerun()
+
+    # --- Aba 1: Relatórios (deixe como já estava) ---
     with tabs[1]:
-        card_start()
-        st.subheader("DRE resumida (mês atual)")
-        dre = qone("""
-            with
-            vendas as (select coalesce(sum(total),0) v from resto.sale where status='FECHADA' and date_trunc('month', date)=date_trunc('month', now())),
-            cmv as (select coalesce(sum(case when kind='OUT' then total_cost else 0 end),0) c from resto.inventory_movement where move_date >= date_trunc('month', now()) and move_date < (date_trunc('month', now()) + interval '1 month')),
-            caixa_desp as (select coalesce(sum(case when kind='OUT' then amount else 0 end),0) d from resto.cashbook where date_trunc('month', entry_date)=date_trunc('month', now())),
-            caixa_outros as (select coalesce(sum(case when kind='IN' then amount else 0 end),0) o from resto.cashbook where date_trunc('month', entry_date)=date_trunc('month', now()))
-            select v, c, d, o, (v + o - c - d) as resultado from vendas, cmv, caixa_desp, caixa_outros;
-        """ )
-        if dre:
-            st.markdown(
-                f"Receita: {money(dre['v'])}  \n"
-                f"CMV: {money(dre['c'])}  \n"
-                f"Despesas: {money(dre['d'])}  \n"
-                f"Outros: {money(dre['o'])}  \n"
-                f"**Resultado:** {money(dre['resultado'])}",
-                unsafe_allow_html=False
-            )
-        else:
-            st.caption("Sem dados para o mês.")
-        card_end()
+        pass  # seu conteúdo existente aqui
+
+    # --- Aba 2: Config (deixe como já estava) ---
+    with tabs[2]:
+        pass  # seu conteúdo existente aqui
 
 
 # ===================== Importar Extrato (CSV C6 / genérico) =====================
