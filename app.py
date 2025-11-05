@@ -993,11 +993,7 @@ def page_importar_extrato():
     out["kind"] = out["amount"].apply(lambda v: "IN" if float(v) >= 0 else "OUT")
     out["category_id"] = out["kind"].apply(lambda k: default_cat_in[0] if k=="IN" else default_cat_out[0])
     # método por linha (auto por descrição)
-    try:
-        out["method"] = out["description"].apply(_guess_method_from_desc)
-    except NameError:
-        # fallback seguro: marca como "outro"
-        out["method"] = "outro"
+    out["method"] = out["description"].apply(_guess_method_from_desc)
     # override global opcional
     if method_override != "— auto por descrição —":
         map_override = {"dinheiro":"dinheiro","pix":"pix","cartão débito":"cartão débito","cartão crédito":"cartão crédito","boleto":"boleto","transferência":"transferência","outro":"outro"}
