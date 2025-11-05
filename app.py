@@ -479,7 +479,7 @@ def page_financeiro():
         dre = qone("""
             with
             vendas as (select coalesce(sum(total),0) v from resto.sale where status='FECHADA' and date_trunc('month', date)=date_trunc('month', now())),
-            cmv as (select coalesce(sum(case when kind='OUT' then total_cost else 0 end),0) c from resto.inventory_movement where date_trunc('month', move_date)=date_trunc('month', now())),
+            cmv as (select coalesce(sum(case when kind='OUT' then total_cost else 0 end),0) c from resto.inventory_movement where move_date >= date_trunc('month', now()) and move_date < (date_trunc('month', now()) + interval '1 month')),
             caixa_desp as (select coalesce(sum(case when kind='OUT' then amount else 0 end),0) d from resto.cashbook where date_trunc('month', entry_date)=date_trunc('month', now())),
             caixa_outros as (select coalesce(sum(case when kind='IN' then amount else 0 end),0) o from resto.cashbook where date_trunc('month', entry_date)=date_trunc('month', now()))
             select v, c, d, o, (v + o - c - d) as resultado from vendas, cmv, caixa_desp, caixa_outros;
