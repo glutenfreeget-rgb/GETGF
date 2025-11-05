@@ -9,7 +9,7 @@ import streamlit as st
 
 # ===================== CONFIG =====================
 st.set_page_config(
-    page_title="Restô ERP Lite",
+    page_title="RGET GLUTEN FREE",
     layout="wide",
     initial_sidebar_state="expanded"
 )
