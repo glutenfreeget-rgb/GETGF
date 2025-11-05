@@ -3,6 +3,24 @@ import os
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+# ===================== HELPER: inferir método pela descrição =====================
+def _guess_method_from_desc(desc: str) -> str:
+    d = (str(desc) if desc is not None else "").upper()
+    if "PIX" in d or "QRCODE" in d or "QR CODE" in d or "CHAVE" in d:
+        return "pix"
+    if "TED" in d or "TEF" in d or "DOC" in d or "TRANSFER" in d or "TRANSFERÊNCIA" in d or "TRANSFERENCIA" in d:
+        return "transferência"
+    if any(k in d for k in ["PAYGO","PAGSEGURO","STONE","CIELO","REDE","GETNET","MERCADO PAGO","VISA","MASTERCARD","ELO"]):
+        return "cartão crédito"
+    if "DÉBITO" in d or "DEBITO" in d:
+        return "cartão débito"
+    if "BOLETO" in d:
+        return "boleto"
+    if "SAQUE" in d or "ATM" in d:
+        return "dinheiro"
+    return "outro"
+
+
 import pandas as pd
 import psycopg, psycopg.rows
 import streamlit as st
@@ -724,7 +742,7 @@ def page_financeiro():
             kind = 'IN' if '(IN)' in cat[1] else 'OUT'
             desc = st.text_input("Descrição")
             val  = st.number_input("Valor", 0.00, 1_000_000.00, 0.00, 0.01)
-            method = st.selectbox("Forma de pagamento", ['dinheiro','pix','cartão débito','cartão crédito','boleto','outro'])
+            method = st.selectbox("Forma de pagamento", ['— auto por descrição —','dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro'])
             ok = st.form_submit_button("Lançar")
         if ok and val>0:
             qexec("insert into resto.cashbook(entry_date, kind, category_id, description, amount, method) values (%s,%s,%s,%s,%s,%s);", (dt, kind, cat[0], desc, val, method))
@@ -732,6 +750,61 @@ def page_financeiro():
 
         df = pd.DataFrame(qall("select entry_date, kind, description, amount, method from resto.cashbook order by entry_date desc, id desc limit 500;"))
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+with st.expander("Gerenciar lançamentos (editar / excluir)", expanded=False):
+    rows_cb = qall("select id, entry_date, kind, category_id, description, amount, method from resto.cashbook order by entry_date desc, id desc limit 500;")
+    import pandas as pd
+    if not rows_cb:
+        st.caption("Nenhum lançamento para gerenciar.")
+    else:
+        opts = [(int(r["id"]), f"#{r['id']} • {r['entry_date']} • {r.get('method') or ''} • {str(r.get('description') or '')[:40]} • {('+' if r['kind']=='IN' else '-')}{r['amount']}") for r in rows_cb]
+        sel = st.selectbox("Selecione um lançamento", options=opts, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+        if sel:
+            sel_id = sel[0]
+            cur = next((r for r in rows_cb if int(r["id"])==sel_id), None)
+            if cur:
+                cats_all = qall("select id, name, kind from resto.cash_category order by name;")
+                colA, colB, colC = st.columns(3)
+                with colA:
+                    new_date = st.date_input("Data", value=pd.to_datetime(cur["entry_date"]).date())
+                with colB:
+                    cat_opts = [(c['id'], f"{c['name']} ({c['kind']})") for c in cats_all]
+                    try:
+                        idx = [c[0] for c in cat_opts].index(cur.get("category_id"))
+                    except Exception:
+                        idx = 0
+                    new_cat = st.selectbox("Categoria", options=cat_opts, index=idx, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+                with colC:
+                    methods = ['dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro']
+                    m0 = cur.get("method") or 'outro'
+                    new_method = st.selectbox("Forma de pagamento", methods, index=(methods.index(m0) if m0 in methods else len(methods)-1))
+                new_desc = st.text_input("Descrição", value=cur.get("description") or "")
+                new_amount = st.number_input("Valor", -1_000_000.0, 1_000_000.0, float(cur.get("amount") or 0.0), 0.01)
+                new_kind = 'IN' if '(IN)' in new_cat[1] else 'OUT'
+                col1b, col2b = st.columns(2)
+                with col1b:
+                    salvar = st.button("💾 Salvar alterações", type="primary", key=f"cb_save_{sel_id}")
+                with col2b:
+                    excluir = st.button("🗑️ Excluir lançamento", type="secondary", key=f"cb_del_{sel_id}")
+                if salvar:
+                    try:
+                        qexec("""
+                        update resto.cashbook
+                           set entry_date=%s, kind=%s, category_id=%s, description=%s, amount=%s, method=%s
+                         where id=%s;
+                        """, (new_date, new_kind, int(new_cat[0]), new_desc[:300], float(new_amount), new_method, sel_id))
+                        st.success("Lançamento atualizado.")
+                        st.experimental_rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao atualizar: {e}")
+                if excluir:
+                    try:
+                        qexec("delete from resto.cashbook where id=%s;", (sel_id,))
+                        st.success("Lançamento excluído.")
+                        st.experimental_rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao excluir: {e}")
+
         card_end()
 
     with tabs[1]:
@@ -909,12 +982,20 @@ def page_importar_extrato():
         default_cat_out = st.selectbox("Categoria padrão para SAÍDAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='OUT'],
                                        format_func=lambda x: x[1] if isinstance(x, tuple) else x)
     with col3:
-        method = st.selectbox("Método (aplicar em todos)", ['dinheiro','pix','cartão débito','cartão crédito','boleto','outro'])
+        method = st.selectbox("Método (opcional — deixe em auto p/ detectar por descrição)", ['— auto por descrição —','dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro'])
 
     # Define coluna kind e category_id por sinal do valor
     out = df.copy()
     out["kind"] = out["amount"].apply(lambda v: "IN" if float(v) >= 0 else "OUT")
     out["category_id"] = out["kind"].apply(lambda k: default_cat_in[0] if k=="IN" else default_cat_out[0])
+    # Método por linha (auto por descrição) + override opcional
+    try:
+        out["method"] = out["description"].apply(_guess_method_from_desc)
+    except Exception:
+        out["method"] = "outro"
+    if method != "— auto por descrição —":
+        out["method"] = method
+
 
     # Duplicados (últimos 12 meses)
     out["duplicado?"] = _find_duplicates(out)
@@ -937,7 +1018,7 @@ def page_importar_extrato():
             qexec("""
                 insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
                 values (%s, %s, %s, %s, %s, %s);
-            """, (str(r["entry_date"]), r["kind"], int(r["category_id"]), str(r["description"])[:300], float(r["amount"]), method))
+            """, (str(r["entry_date"]), r["kind"], int(r["category_id"]), str(r["description"])[:300], float(r["amount"]), r.get("method") or 'outro'))
             ok += 1
         st.success(f"Importados {ok} lançamentos no livro-caixa!")
     card_end()
