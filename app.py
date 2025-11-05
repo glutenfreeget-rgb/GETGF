@@ -954,7 +954,8 @@ def page_importar_extrato():
         card_end()
         return
 
-    up = st.file_uploader("CSV do banco", type=["csv"], key="import_extrato_file")
+    st.session_state.setdefault("import_extrato_key", "import_extrato_file_" + uuid.uuid4().hex if "import_extrato_key" not in st.session_state else st.session_state["import_extrato_key"])
+    up = st.file_uploader("CSV do banco", type=["csv"], key=st.session_state["import_extrato_key"])
     if not up:
         st.info("Dica: o CSV do C6 com cabeçalho 'Data Lançamento, Data Contábil, ...' é detectado automaticamente.")
         card_end()
@@ -1030,12 +1031,13 @@ def page_importar_extrato():
             """, (str(r["entry_date"]), r["kind"], int(r["category_id"]), str(r["description"])[:300], float(r["amount"]), r.get("method") or "outro"))
             ok += 1
         st.session_state["import_lock"] = False
-        st.session_state["import_extrato_file"] = None
+        st.session_state[st.session_state["import_extrato_key"]] = None
         st.success(f"Importados {ok} lançamentos no livro-caixa!")
     card_end()
 
 
-    up = st.file_uploader("CSV do banco", type=["csv"], key="import_extrato_file")
+    st.session_state.setdefault("import_extrato_key", "import_extrato_file_" + uuid.uuid4().hex if "import_extrato_key" not in st.session_state else st.session_state["import_extrato_key"])
+    up = st.file_uploader("CSV do banco", type=["csv"], key=st.session_state["import_extrato_key"])
     if not up:
         st.info("Dica: o CSV do C6 com cabeçalho 'Data Lançamento, Data Contábil, ...' é detectado automaticamente.")
         card_end()
@@ -1113,7 +1115,8 @@ def page_importar_extrato():
     card_end()
 
 
-    up = st.file_uploader("CSV do banco", type=["csv"], key="import_extrato_file")
+    st.session_state.setdefault("import_extrato_key", "import_extrato_file_" + uuid.uuid4().hex if "import_extrato_key" not in st.session_state else st.session_state["import_extrato_key"])
+    up = st.file_uploader("CSV do banco", type=["csv"], key=st.session_state["import_extrato_key"])
     if not up:
         st.info("Dica: o CSV do C6 com cabeçalho 'Data Lançamento,Data Contábil, ...' é detectado automaticamente.")
         card_end()
