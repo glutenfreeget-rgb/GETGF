@@ -561,7 +561,7 @@ def page_cadastros():
         with st.form("form_prod"):
             code = st.text_input("Código interno")
             name = st.text_input("Nome *")
-            category_id = st.selectbox("Categoria", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in []], index=0) if False else st.selectbox("Categoria", options=[(c['id'], c['name']) for c in cats] if cats else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if cats else 0)
+            category_id = st.selectbox("Categoria", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in []], index=0) if False else st.selectbox("Categoria", options=[(c['id'], c['name']) for c in cats] if cats else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if cats else None)
             unit_id = st.selectbox("Unidade *", options=[(u['id'], u['abbr']) for u in units] if units else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if units else None)
 
             st.markdown("**Campos fiscais (opcional)**")
@@ -987,7 +987,7 @@ def page_financeiro():
 
         with st.form("form_caixa"):
             dt = st.date_input("Data", value=date.today())
-            cat = st.selectbox("Categoria", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats], format_func=lambda x: x[1])
+            cat = st.selectbox("Categoria", options=[(c['id'], f\"{c['name']} ({c['kind']})\") for c in cats], format_func=lambda x: x[1])
             kind = 'IN' if (cat and '(IN)' in cat[1]) else 'OUT'
             desc = st.text_input("Descrição")
             val  = st.number_input("Valor", 0.00, 1_000_000.00, 0.00, 0.01)
