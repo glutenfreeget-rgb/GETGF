@@ -993,26 +993,14 @@ def _load_c6bank_csv_bytes(raw_bytes) -> pd.DataFrame:
     return df_std
 
 def _load_bank_file(upfile) -> pd.DataFrame:
-    # Detecta automaticamente C6/OFX/CSV genérico evitando bytes com não-ASCII
     name = (upfile.name or "").lower()
     raw = upfile.read()
-
-    header_marker_text = "Data Lançamento,Data Contábil,Título,Descrição,Entrada(R$),Saída(R$),Saldo do Dia(R$)"
-    try:
-        txt = raw.decode("utf-8-sig")
-    except Exception:
-        txt = raw.decode("latin1", errors="ignore")
-
-    # C6 Bank: cabeçalho textual + linha de títulos
-    if "EXTRATO DE CONTA CORRENTE C6 BANK" in txt or header_marker_text in txt:
+    if b"EXTRATO DE CONTA CORRENTE C6 BANK" in raw or \
+       b"Data Lançamento,Data Cont\xc3\xa1bil,T\xc3\xadtulo,Descri\xc3\xa7\xc3\xa3o,Entrada(R$),Sa\xc3\xadda(R$),Saldo do Dia(R$)" in raw:
         return _load_c6bank_csv_bytes(raw)
-
-    # OFX
     if name.endswith(".ofx"):
         from io import BytesIO
         return _load_ofx(BytesIO(raw))
-
-    # CSV genérico
     from io import BytesIO
     return _load_csv(BytesIO(raw))
 
