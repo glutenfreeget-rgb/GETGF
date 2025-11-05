@@ -1016,7 +1016,6 @@ def _load_bank_file(upfile) -> pd.DataFrame:
     from io import BytesIO
     return _load_csv(BytesIO(raw))
 
-
 @st.cache_data(show_spinner=False)
 def _load_rules() -> List[Dict[str, Any]]:
     return safe_qall("""
