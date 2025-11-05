@@ -343,7 +343,7 @@ def ensure_migrations_core():
     qexec("create index if not exists invmov_ref_idx on resto.inventory_movement(reference_id);")
 
     # --- Função de movimentos (cria/atualiza sempre) ---
-    qexec(r\"""
+    qexec(r"""
     create or replace function resto.sp_register_movement(
       p_product_id bigint,
       p_kind text,
@@ -394,7 +394,7 @@ def ensure_migrations_core():
         raise exception 'Invalid kind %', p_kind;
       end if;
     end $$;
-    \""")
+    """)
 
 
 
