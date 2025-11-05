@@ -9,7 +9,7 @@ import streamlit as st
 
 # ===================== CONFIG =====================
 st.set_page_config(
-    page_title="RGET GLUTEN FREE",
+    page_title="GET GLUTEN FREE",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -734,7 +734,7 @@ def main():
         st.stop()
     ensure_migrations()
 
-    header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")
+    header("🍝 Get Gluten Free Ltda", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")
     page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro"], index=0)
 
     if page == "Painel": page_dashboard()
