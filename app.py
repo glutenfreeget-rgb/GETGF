@@ -728,20 +728,164 @@ def page_estoque():
         else:
             st.caption("Nenhum lote dentro do período selecionado.")
         card_end()
-
+#---------------------FINANCEIRO-----------------------------------------
 def page_financeiro():
-    # ... seu cabeçalho/contadores/filtros existentes ...
+    header("💰 Financeiro", "Entradas, Saídas e DRE.")
+    tabs = st.tabs(["💸 Entradas", "💳 Saídas", "📈 DRE", "⚙️ Gestão"])
 
-    # Sempre crie as abas antes de usá-las
-    tabs = st.tabs(["📒 Livro caixa", "📈 Relatórios", "⚙️ Config"])
+    METHODS = ['— todas —', 'dinheiro', 'pix', 'cartão débito', 'cartão crédito', 'boleto', 'transferência', 'outro']
 
-    # --- Aba 0: Livro caixa ---
+    # ---------- helpers ----------
+    def _cat_options(kind_code: str):
+        rows = qall("select id, name, kind from resto.cash_category where kind=%s order by name;", (kind_code,))
+        return [(0, "— todas —")] + [(r["id"], r["name"]) for r in rows or []], {r["id"]: r["name"] for r in (rows or [])}
+
+    def _filters_ui(prefix: str, kind_code: str):
+        st.subheader("Filtros")
+        c1, c2 = st.columns(2)
+        with c1:
+            dt_ini = st.date_input("De", value=date.today().replace(day=1), key=f"{prefix}_dtini")
+        with c2:
+            dt_fim = st.date_input("Até", value=date.today(), key=f"{prefix}_dtfim")
+
+        opts, cat_map = _cat_options(kind_code)
+        c3, c4, c5 = st.columns([2, 1, 1])
+        with c3:
+            cat_sel = st.selectbox("Categoria", options=opts, format_func=lambda x: x[1], key=f"{prefix}_cat")
+        with c4:
+            method = st.selectbox("Método", METHODS, key=f"{prefix}_method")
+        with c5:
+            lim = st.number_input("Limite", 100, 5000, 1000, 100, key=f"{prefix}_limit")
+
+        desc = st.text_input("Buscar texto na descrição", key=f"{prefix}_desc")
+
+        return dt_ini, dt_fim, cat_sel, method, desc, lim, cat_map
+
+    def _run_grid(kind_code: str, prefix: str, title: str):
+        card_start()
+        st.subheader(title)
+
+        dt_ini, dt_fim, cat_sel, method, desc, lim, cat_map = _filters_ui(prefix, kind_code)
+
+        wh = ["kind=%s", "entry_date >= %s", "entry_date <= %s"]
+        pr = [kind_code, dt_ini, dt_fim]
+
+        if cat_sel and cat_sel[0]:
+            wh.append("category_id = %s")
+            pr.append(int(cat_sel[0]))
+        if method and method != '— todas —':
+            wh.append("method = %s")
+            pr.append(method)
+        if desc and desc.strip():
+            wh.append("description ILIKE %s")
+            pr.append(f"%{desc.strip()}%")
+
+        sql = f"""
+            select id, entry_date, kind, category_id, description, amount, method
+              from resto.cashbook
+             where {' and '.join(wh)}
+             order by entry_date desc, id desc
+             limit %s;
+        """
+        pr2 = pr + [int(lim)]
+        rows = qall(sql, tuple(pr2))
+        df = pd.DataFrame(rows or [])
+        if not df.empty:
+            df["categoria"] = df["category_id"].map(cat_map).fillna("")
+            df = df[["entry_date", "categoria", "method", "description", "amount", "id", "category_id", "kind"]]
+            st.dataframe(df.drop(columns=["id", "category_id", "kind"]), use_container_width=True, hide_index=True)
+            total = float(df["amount"].sum())
+            st.markdown(f"**Total filtrado ({'Entradas' if kind_code=='IN' else 'Saídas'}):** {money(total)}")
+        else:
+            st.caption("Sem lançamentos para os filtros selecionados.")
+        card_end()
+
+    # ---------- Aba: Entradas ----------
     with tabs[0]:
-        # (deixe aqui tudo que você já tinha: filtros, resumo, tabela, etc.)
+        _run_grid("IN", "in", "📥 Entradas")
 
-        # EXPANDER: Gerenciar lançamentos (editar / excluir)
-        with st.expander("Gerenciar lançamentos (editar / excluir)", expanded=False):
-            import pandas as pd
+    # ---------- Aba: Saídas ----------
+    with tabs[1]:
+        _run_grid("OUT", "out", "📤 Saídas")
+
+    # ---------- Aba: DRE ----------
+    with tabs[2]:
+        card_start()
+        st.subheader("DRE (período)")
+        d1, d2 = st.columns(2)
+        with d1:
+            dre_ini = st.date_input("De", value=date.today().replace(day=1), key="dre_dtini")
+        with d2:
+            dre_fim = st.date_input("Até", value=date.today(), key="dre_dtfim")
+
+        # Tenta DRE completa (vendas/CMV) se tabelas existirem.
+        try:
+            dt_end_next = dre_fim + timedelta(days=1)
+            dre = qone("""
+                with
+                vendas as (
+                    select coalesce(sum(total),0) v
+                      from resto.sale
+                     where status='FECHADA'
+                       and date >= %s
+                       and date <  %s
+                ),
+                cmv as (
+                    select coalesce(sum(case when kind='OUT' then total_cost else 0 end),0) c
+                      from resto.inventory_movement
+                     where move_date >= %s
+                       and move_date <  %s
+                ),
+                caixa_desp as (
+                    select coalesce(sum(case when kind='OUT' then amount else 0 end),0) d
+                      from resto.cashbook
+                     where entry_date >= %s
+                       and entry_date <  %s
+                ),
+                caixa_outros as (
+                    select coalesce(sum(case when kind='IN' then amount else 0 end),0) o
+                      from resto.cashbook
+                     where entry_date >= %s
+                       and entry_date <  %s
+                )
+                select v, c, d, o, (v + o - c - d) as resultado
+                  from vendas, cmv, caixa_desp, caixa_outros;
+            """, (dre_ini, dt_end_next, dre_ini, dt_end_next, dre_ini, dt_end_next, dre_ini, dt_end_next))
+            if dre:
+                st.markdown(
+                    f"**Receita (vendas):** {money(dre['v'])}  \n"
+                    f"**CMV:** {money(dre['c'])}  \n"
+                    f"**Despesas (livro-caixa):** {money(dre['d'])}  \n"
+                    f"**Outras receitas (livro-caixa):** {money(dre['o'])}  \n"
+                    f"### **Resultado:** {money(dre['resultado'])}"
+                )
+            else:
+                raise RuntimeError("Sem dados")
+        except Exception:
+            # Fallback: DRE apenas pelo livro-caixa
+            tot_in = qone("""
+                select coalesce(sum(amount),0) s
+                  from resto.cashbook
+                 where kind='IN' and entry_date between %s and %s
+            """, (dre_ini, dre_fim))["s"]
+            tot_out = qone("""
+                select coalesce(sum(amount),0) s
+                  from resto.cashbook
+                 where kind='OUT' and entry_date between %s and %s
+            """, (dre_ini, dre_fim))["s"]
+            st.warning("DRE simplificada usando apenas o livro-caixa (tabelas de vendas/CMV não encontradas).")
+            st.markdown(
+                f"**Entradas:** {money(tot_in)}  \n"
+                f"**Saídas:** {money(tot_out)}  \n"
+                f"### **Resultado:** {money(tot_in - tot_out)}"
+            )
+        card_end()
+
+    # ---------- Aba: Gestão (Editar / Excluir) ----------
+    with tabs[3]:
+        card_start()
+        st.subheader("Gerenciar lançamentos (editar / excluir)")
+        with st.expander("Abrir gerenciador", expanded=False):
             rows_cb = qall("""
                 select id, entry_date, kind, category_id, description, amount, method
                   from resto.cashbook
@@ -792,12 +936,12 @@ def page_financeiro():
                                 key=f"cb_cat_{sel_id}"
                             )
                         with colC:
-                            methods = ['dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro']
+                            methods2 = ['dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro']
                             m0 = cur.get("method") or 'outro'
-                            i0 = methods.index(m0) if m0 in methods else len(methods) - 1
+                            i0 = methods2.index(m0) if m0 in methods2 else len(methods2) - 1
                             new_method = st.selectbox(
                                 "Forma de pagamento",
-                                methods,
+                                methods2,
                                 index=i0,
                                 key=f"cb_method_{sel_id}"
                             )
@@ -822,8 +966,7 @@ def page_financeiro():
                                 update resto.cashbook
                                    set entry_date=%s, kind=%s, category_id=%s, description=%s, amount=%s, method=%s
                                  where id=%s;
-                            """, (new_date, new_kind, int(new_cat[0]),
-                                  (new_desc or "")[:300], float(new_amount), new_method, sel_id))
+                            """, (new_date, new_kind, int(new_cat[0]), (new_desc or "")[:300], float(new_amount), new_method, sel_id))
                             st.success("Lançamento atualizado.")
                             st.experimental_rerun()
 
@@ -831,14 +974,7 @@ def page_financeiro():
                             qexec("delete from resto.cashbook where id=%s;", (sel_id,))
                             st.success("Lançamento excluído.")
                             st.experimental_rerun()
-
-    # --- Aba 1: Relatórios (deixe como já estava) ---
-    with tabs[1]:
-        pass  # seu conteúdo existente aqui
-
-    # --- Aba 2: Config (deixe como já estava) ---
-    with tabs[2]:
-        pass  # seu conteúdo existente aqui
+        card_end()
 
 
 # ===================== Importar Extrato (CSV C6 / genérico) =====================
