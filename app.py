@@ -210,6 +210,7 @@ def page_dashboard():
         st.markdown("**Valor do Estoque (CMP)**\n\n<h3 class='kpi'>{}</h3>".format(money(stock.get('val',0))), unsafe_allow_html=True)
         st.caption("Quantidade total em estoque: {:.2f}".format(stock.get('qty',0)))
         card_end()
+    st.session_state["_import_extrato_rendering"] = False
 
     with col2:
         card_start()
@@ -578,18 +579,21 @@ def page_producao():
     prod = st.selectbox("Produto final *", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
     if not prod:
         card_end()
+        st.session_state["_import_extrato_rendering"] = False
         return
 
     recipe = qone("select * from resto.recipe where product_id=%s;", (prod[0],))
     if not recipe:
         st.warning("Este produto não possui ficha técnica (receita). Cadastre em 'Receitas & Preços'.")
         card_end()
+        st.session_state["_import_extrato_rendering"] = False
         return
 
     yield_qty = float(recipe["yield_qty"] or 0.0)
     if yield_qty <= 0:
         st.error("Ficha técnica inválida: rendimento deve ser > 0.")
         card_end()
+        st.session_state["_import_extrato_rendering"] = False
         return
 
     with st.form("form_producao"):
@@ -600,6 +604,7 @@ def page_producao():
 
     if not ok or qty_out <= 0:
         card_end()
+        st.session_state["_import_extrato_rendering"] = False
         return
 
     # Carrega ingredientes da receita
@@ -638,6 +643,7 @@ def page_producao():
     if falta:
         st.error("Estoque insuficiente para os ingredientes:\n" + "\n".join([f"- {n}: precisa {q:.3f}, alocado {a:.3f}" for n,q,a in falta]))
         card_end()
+        st.session_state["_import_extrato_rendering"] = False
         return
 
     # Calcula custo do lote final
@@ -952,352 +958,18 @@ def page_importar_extrato():
     if st.session_state["import_lock"]:
         st.warning("Importação em andamento... aguarde finalizar.")
         card_end()
+        st.session_state["_import_extrato_rendering"] = False
         return
 
-    if "import_extrato_key" not in st.session_state:
-        _rand = (uuid.uuid4().hex if ("uuid" in globals() and uuid) else __import__("secrets").token_hex(16))
-        st.session_state["import_extrato_key"] = "import_extrato_file_" + _rand
-    up = st.file_uploader("CSV do banco", type=["csv"], key=st.session_state["import_extrato_key"])
-    if not up:
-        st.info("Dica: o CSV do C6 com cabeçalho 'Data Lançamento, Data Contábil, ...' é detectado automaticamente.")
+    # --- Render guard: evita criar dois file_uploaders no mesmo run ---
+    if st.session_state.get("_import_extrato_rendering", False):
+        st.info("Carregador já renderizado neste ciclo.")
         card_end()
+        st.session_state["_import_extrato_rendering"] = False
         return
-
-    df = _load_bank_file(up)
-    if df.empty or not set(df.columns) >= {"entry_date","description","amount"}:
-        st.error("Não consegui reconhecer o layout (preciso de: data, descrição, valor).")
-        card_end()
-        return
-
-    st.success(f"Arquivo reconhecido. {len(df)} linhas.")
-    st.dataframe(df.head(100), use_container_width=True, hide_index=True)
-
-    st.subheader("2) Ajustes e classificação")
-    cats = qall("select id, name, kind from resto.cash_category order by name;")
-    if not cats:
-        st.warning("Nenhuma categoria encontrada. Crie categorias em **Financeiro → Livro caixa** antes de importar.")
-        card_end()
-        return
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        default_cat_in = st.selectbox("Categoria padrão para ENTRADAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='IN'],
-                                      format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-    with col2:
-        default_cat_out = st.selectbox("Categoria padrão para SAÍDAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='OUT'],
-                                       format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-    with col3:
-        method_override = st.selectbox(
-            "Método (opcional — deixe em auto p/ detectar por descrição)",
-            options=["— auto por descrição —","dinheiro","pix","cartão débito","cartão crédito","boleto","transferência","outro"],
-            index=0
-        )
-
-    # Define coluna kind e category_id por sinal do valor
-    out = df.copy()
-    out["kind"] = out["amount"].apply(lambda v: "IN" if float(v) >= 0 else "OUT")
-    out["category_id"] = out["kind"].apply(lambda k: default_cat_in[0] if k=="IN" else default_cat_out[0])
-    # método por linha (auto por descrição)
-    try:
-        out["method"] = out["description"].apply(_guess_method_from_desc)
-    except NameError:
-        out["method"] = "outro"
-    # override global opcional
-    if method_override != "— auto por descrição —":
-        map_override = {"dinheiro":"dinheiro","pix":"pix","cartão débito":"cartão débito","cartão crédito":"cartão crédito","boleto":"boleto","transferência":"transferência","outro":"outro"}
-        out["method"] = map_override.get(method_override, "outro")
-
-    # Duplicados (últimos 12 meses)
-    out["duplicado?"] = _find_duplicates(out)
-
-    st.subheader("3) Conferência")
-    st.dataframe(out.head(100), use_container_width=True, hide_index=True)
-    st.info(f"Detectados **{int(out['duplicado?'].sum())}** possíveis duplicados (mesma data, valor e início da descrição). Eles não serão importados.")
-
-    st.subheader("4) Importar")
-    prontos = out[~out["duplicado?"]].copy()
-    st.markdown(f"Prontos para importar: **{len(prontos)}**")
-
-    with st.form("form_import"):
-        confirma = st.checkbox("Confirmo que revisei os dados e desejo importar os lançamentos.")
-        go = st.form_submit_button(f"🚀 Importar {len(prontos)} lançamentos")
-
-    if go and confirma and not st.session_state["import_lock"]:
-        st.session_state["import_lock"] = True
-        ok = 0
-        for _, r in prontos.iterrows():
-            qexec("""
-                insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
-                values (%s, %s, %s, %s, %s, %s)
-                on conflict do nothing;
-            """, (str(r["entry_date"]), r["kind"], int(r["category_id"]), str(r["description"])[:300], float(r["amount"]), r.get("method") or "outro"))
-            ok += 1
-        st.session_state["import_lock"] = False
-        st.session_state[st.session_state["import_extrato_key"]] = None
-        st.success(f"Importados {ok} lançamentos no livro-caixa!")
-    card_end()
-
-
-    if "import_extrato_key" not in st.session_state:
-        _rand = (uuid.uuid4().hex if ("uuid" in globals() and uuid) else __import__("secrets").token_hex(16))
-        st.session_state["import_extrato_key"] = "import_extrato_file_" + _rand
-    up = st.file_uploader("CSV do banco", type=["csv"], key=st.session_state["import_extrato_key"])
-    if not up:
-        st.info("Dica: o CSV do C6 com cabeçalho 'Data Lançamento, Data Contábil, ...' é detectado automaticamente.")
-        card_end()
-        return
-
-    df = _load_bank_file(up)
-    if df.empty or not set(df.columns) >= {"entry_date","description","amount"}:
-        st.error("Não consegui reconhecer o layout (preciso de: data, descrição, valor).")
-        card_end()
-        return
-
-    st.success(f"Arquivo reconhecido. {len(df)} linhas.")
-    st.dataframe(df.head(100), use_container_width=True, hide_index=True)
-
-    st.subheader("2) Ajustes e classificação")
-    cats = qall("select id, name, kind from resto.cash_category order by name;")
-    if not cats:
-        st.warning("Nenhuma categoria encontrada. Crie categorias em **Financeiro → Livro caixa** antes de importar.")
-        card_end()
-        return
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        default_cat_in = st.selectbox("Categoria padrão para ENTRADAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='IN'],
-                                      format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-    with col2:
-        default_cat_out = st.selectbox("Categoria padrão para SAÍDAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='OUT'],
-                                       format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-    with col3:
-        method_override = st.selectbox(
-            "Método (opcional — deixe em auto p/ detectar por descrição)",
-            options=["— auto por descrição —","dinheiro","pix","cartão débito","cartão crédito","boleto","transferência","outro"],
-            index=0
-        )
-
-    # Define coluna kind e category_id por sinal do valor
-    out = df.copy()
-    out["kind"] = out["amount"].apply(lambda v: "IN" if float(v) >= 0 else "OUT")
-    out["category_id"] = out["kind"].apply(lambda k: default_cat_in[0] if k=="IN" else default_cat_out[0])
-    # método por linha (auto por descrição)
-    out["method"] = out["description"].apply(_guess_method_from_desc)
-    # override global opcional
-    if method_override != "— auto por descrição —":
-        map_override = {"dinheiro":"dinheiro","pix":"pix","cartão débito":"cartão débito","cartão crédito":"cartão crédito","boleto":"boleto","transferência":"transferência","outro":"outro"}
-        out["method"] = map_override.get(method_override, "outro")
-
-    # Duplicados (últimos 12 meses)
-    out["duplicado?"] = _find_duplicates(out)
-
-    st.subheader("3) Conferência")
-    st.dataframe(out.head(100), use_container_width=True, hide_index=True)
-    st.info(f"Detectados **{int(out['duplicado?'].sum())}** possíveis duplicados (mesma data, valor e início da descrição). Eles não serão importados.")
-
-    st.subheader("4) Importar")
-    prontos = out[~out["duplicado?"]].copy()
-    st.markdown(f"Prontos para importar: **{len(prontos)}**")
-
-    with st.form("form_import"):
-        confirma = st.checkbox("Confirmo que revisei os dados e desejo importar os lançamentos.")
-        go = st.form_submit_button(f"🚀 Importar {len(prontos)} lançamentos")
-
-    if go and confirma and not st.session_state["import_lock"]:
-        st.session_state["import_lock"] = True
-        ok = 0
-        for _, r in prontos.iterrows():
-            qexec("""
-                insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
-                values (%s, %s, %s, %s, %s, %s)
-                on conflict do nothing;
-            """, (str(r["entry_date"]), r["kind"], int(r["category_id"]), str(r["description"])[:300], float(r["amount"]), r.get("method") or "outro"))
-            ok += 1
-        st.session_state["import_lock"] = False
-        st.session_state["bank_file"] = None
-        st.success(f"Importados {ok} lançamentos no livro-caixa!")
-    card_end()
-
-
-    if "import_extrato_key" not in st.session_state:
-        _rand = (uuid.uuid4().hex if ("uuid" in globals() and uuid) else __import__("secrets").token_hex(16))
-        st.session_state["import_extrato_key"] = "import_extrato_file_" + _rand
-    up = st.file_uploader("CSV do banco", type=["csv"], key=st.session_state["import_extrato_key"])
-    if not up:
-        st.info("Dica: o CSV do C6 com cabeçalho 'Data Lançamento,Data Contábil, ...' é detectado automaticamente.")
-        card_end()
-        return
-
-    df = _load_bank_file(up)
-    if df.empty or not set(df.columns) >= {"entry_date","description","amount"}:
-        st.error("Não consegui reconhecer o layout (preciso de: data, descrição, valor).")
-        card_end()
-        return
-
-    st.success(f"Arquivo reconhecido. {len(df)} linhas.")
-    st.dataframe(df.head(100), use_container_width=True, hide_index=True)
-
-    st.subheader("2) Ajustes e classificação")
-    cats = qall("select id, name, kind from resto.cash_category order by name;")
-    if not cats:
-        st.warning("Nenhuma categoria encontrada. Crie categorias em **Financeiro → Livro caixa** antes de importar.")
-        card_end()
-        return
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        default_cat_in = st.selectbox("Categoria padrão para ENTRADAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='IN'],
-                                      format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-    with col2:
-        default_cat_out = st.selectbox("Categoria padrão para SAÍDAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='OUT'],
-                                       format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-    with col3:
-        method_override = st.selectbox(
-            "Método (opcional — deixe em auto p/ detectar por descrição)",
-            options=["— auto por descrição —","dinheiro","pix","cartão débito","cartão crédito","boleto","transferência","outro"],
-            index=0
-        )
-
-    # Define coluna kind e category_id por sinal do valor
-    out = df.copy()
-    out["kind"] = out["amount"].apply(lambda v: "IN" if float(v) >= 0 else "OUT")
-    out["category_id"] = out["kind"].apply(lambda k: default_cat_in[0] if k=="IN" else default_cat_out[0])
-    # método por linha (auto por descrição)
-    out["method"] = out["description"].apply(_guess_method_from_desc)
-    # override global opcional
-    if method_override != "— auto por descrição —":
-        map_override = {"dinheiro":"dinheiro","pix":"pix","cartão débito":"cartão débito","cartão crédito":"cartão crédito","boleto":"boleto","transferência":"transferência","outro":"outro"}
-        out["method"] = map_override.get(method_override, "outro")
-
-    # Duplicados (últimos 12 meses)
-    out["duplicado?"] = _find_duplicates(out)
-
-    st.subheader("3) Conferência")
-    st.dataframe(out.head(100), use_container_width=True, hide_index=True)
-    st.info(f"Detectados **{int(out['duplicado?'].sum())}** possíveis duplicados (mesma data, valor e início da descrição). Eles não serão importados.")
-
-    st.subheader("4) Importar")
-    prontos = out[~out["duplicado?"]].copy()
-    st.markdown(f"Prontos para importar: **{len(prontos)}**")
-
-    with st.form("form_import"):
-        confirma = st.checkbox("Confirmo que revisei os dados e desejo importar os lançamentos.")
-        go = st.form_submit_button(f"🚀 Importar {len(prontos)} lançamentos")
-
-    if go and confirma and not st.session_state["import_lock"]:
-        st.session_state["import_lock"] = True
-        ok = 0
-        for _, r in prontos.iterrows():
-            qexec("""
-                insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
-                values (%s, %s, %s, %s, %s, %s)
-                on conflict do nothing;
-            """, (str(r["entry_date"]), r["kind"], int(r["category_id"]), str(r["description"])[:300], float(r["amount"]), r.get("method") or "outro"))
-            ok += 1
-        st.session_state["import_lock"] = False
-        st.session_state["bank_file"] = None
-        st.success(f"Importados {ok} lançamentos no livro-caixa!")
-    card_end()
-
-
-    df = _load_bank_file(up)
-    if df.empty or not set(df.columns) >= {"entry_date","description","amount"}:
-        st.error("Não consegui reconhecer o layout (preciso de: data, descrição, valor).")
-        card_end()
-        return
-
-    st.success(f"Arquivo reconhecido. {len(df)} linhas.")
-    st.dataframe(df.head(100), use_container_width=True, hide_index=True)
-
-    st.subheader("2) Ajustes e classificação")
-    cats = qall("select id, name, kind from resto.cash_category order by name;")
-    if not cats:
-        st.warning("Nenhuma categoria encontrada. Crie categorias em **Financeiro → Livro caixa** antes de importar.")
-        card_end()
-        return
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        default_cat_in = st.selectbox("Categoria padrão para ENTRADAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='IN'],
-                                      format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-    with col2:
-        default_cat_out = st.selectbox("Categoria padrão para SAÍDAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='OUT'],
-                                       format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-    with col3:
-        method = st.selectbox("Método (aplicar em todos)", ['dinheiro','pix','cartão débito','cartão crédito','boleto','outro'])
-
-    # Define coluna kind e category_id por sinal do valor
-    out = df.copy()
-    out["kind"] = out["amount"].apply(lambda v: "IN" if float(v) >= 0 else "OUT")
-    out["category_id"] = out["kind"].apply(lambda k: default_cat_in[0] if k=="IN" else default_cat_out[0])
-
-    # Duplicados (últimos 12 meses)
-    out["duplicado?"] = _find_duplicates(out)
-
-    st.subheader("3) Conferência")
-    st.dataframe(out.head(100), use_container_width=True, hide_index=True)
-    st.info(f"Detectados **{int(out['duplicado?'].sum())}** possíveis duplicados (mesma data, valor e início da descrição). Eles não serão importados.")
-
-    st.subheader("4) Importar")
-    prontos = out[~out["duplicado?"]].copy()
-    st.markdown(f"Prontos para importar: **{len(prontos)}**")
-
-    with st.form("form_import"):
-        confirma = st.checkbox("Confirmo que revisei os dados e desejo importar os lançamentos.")
-        go = st.form_submit_button(f"🚀 Importar {len(prontos)} lançamentos")
-
-    if go and confirma:
-        ok = 0
-        for _, r in prontos.iterrows():
-            qexec("""
-                insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
-                values (%s, %s, %s, %s, %s, %s);
-            """, (str(r["entry_date"]), r["kind"], int(r["category_id"]), str(r["description"])[:300], float(r["amount"]), method))
-            ok += 1
-        st.success(f"Importados {ok} lançamentos no livro-caixa!")
-    card_end()
-
-
-# ===================== Router =====================
-def main():
-    if not ensure_ping():
-        st.stop()
-    ensure_migrations()
-
-    header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")
-    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro", "Importar Extrato"], index=0)
-
-    if page == "Painel": page_dashboard()
-    elif page == "Cadastros": page_cadastros()
-    elif page == "Compras": page_compras()
-    elif page == "Vendas": page_vendas()
-    elif page == "Receitas & Preços": page_receitas_precos()
-    elif page == "Produção": page_producao()
-    elif page == "Estoque": page_estoque()
-    elif page == "Financeiro": page_financeiro()
-    elif page == "Importar Extrato": page_importar_extrato()
-def _guess_method_from_desc(desc: str) -> str:
-    """Heurística para detectar forma de pagamento a partir da descrição do extrato."""
-    d = (desc or "").upper()
-    # PIX / QR / chave
-    if "PIX" in d or "QRCODE" in d or "QR CODE" in d or "CHAVE" in d:
-        return "pix"
-    # Transferências
-    if "TED" in d or "TEF" in d or "DOC" in d or "TRANSFER" in d or "TRANSFERÊNCIA" in d:
-        return "transferência"
-    # Adquirentes / cartões
-    if any(k in d for k in ["PAYGO", "PAGSEGURO", "STONE", "CIELO", "REDE", "GETNET", "MERCADO PAGO", "VISA", "MASTERCARD", "ELO"]):
-        return "cartão crédito"
-    # Marketplaces / apps
-    if any(k in d for k in ["IFOOD", "RAPPI", "UBER", "99FOOD"]):
-        return "pix"
-    # Boletos
-    if "BOLETO" in d:
-        return "boleto"
-    # Saque / ATM
-    if "SAQUE" in d or "ATM" in d:
-        return "dinheiro"
-    return "outro"
-
-if __name__ == "__main__":
-    main()
+    st.session_state["_import_extrato_rendering"] = True
+    
+    # --- Uploader sem key de usuário; usa rótulo salgado para ser único e permitir 'limpar' ---
+    st.session_state.setdefault("import_extrato_salt", 1)
+    uploader_label = f"CSV do banco — sessão {st.session_state['import_extrato_salt']}"
+    up = st.file_uploader(uploader_label, type=["csv"])
