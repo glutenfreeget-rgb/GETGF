@@ -188,6 +188,15 @@ def fifo_allocate(product_id: int, required_qty: float) -> List[Dict[str, Any]]:
         remaining -= take
     return alloc
 
+# helper universal (coloque perto das outras funções utilitárias)
+def _rerun():
+    try:
+        st.rerun()
+    except Exception:
+        # fallback p/ versões antigas
+        if hasattr(st, "experimental_rerun"):
+            st.experimental_rerun()
+
 # ===================== Pages =====================
 
 def page_dashboard():
@@ -729,7 +738,6 @@ def page_estoque():
             st.caption("Nenhum lote dentro do período selecionado.")
         card_end()
 
-# ===================== FINANCEIRO =====================
 def page_financeiro():
     header("💰 Financeiro", "Entradas, Saídas e DRE.")
     tabs = st.tabs(["💸 Entradas", "💳 Saídas", "📈 DRE", "⚙️ Gestão"])
@@ -892,7 +900,6 @@ def page_financeiro():
         with colf2:
             g_dtfim = st.date_input("Até", value=date.today(), key="gest_dtfim")
 
-        # filtro de tipo (ambos / entradas / saídas)
         kind_label = st.selectbox("Tipo", ["— ambos —", "Entradas (IN)", "Saídas (OUT)"], key="gest_kind")
         if kind_label == "Entradas (IN)":
             kind_filter = "IN"
@@ -901,7 +908,6 @@ def page_financeiro():
         else:
             kind_filter = None
 
-        # categorias (todas)
         cats_all = qall("select id, name, kind from resto.cash_category order by name;") or []
         cat_labels = ["— todas —"] + [f"{c['name']} ({c['kind']})" for c in cats_all]
         cat_label_to_id = {"— todas —": 0}
@@ -918,21 +924,16 @@ def page_financeiro():
 
         g_desc = st.text_input("Buscar texto na descrição", key="gest_desc")
 
-        # Query com filtros
         wh = ["entry_date >= %s", "entry_date <= %s"]
         pr = [g_dtini, g_dtfim]
         if kind_filter:
-            wh.append("kind = %s")
-            pr.append(kind_filter)
+            wh.append("kind = %s"); pr.append(kind_filter)
         if g_cat_label and cat_label_to_id[g_cat_label] != 0:
-            wh.append("category_id = %s")
-            pr.append(cat_label_to_id[g_cat_label])
+            wh.append("category_id = %s"); pr.append(cat_label_to_id[g_cat_label])
         if g_method and g_method != '— todas —':
-            wh.append("method = %s")
-            pr.append(g_method)
+            wh.append("method = %s"); pr.append(g_method)
         if g_desc and g_desc.strip():
-            wh.append("description ILIKE %s")
-            pr.append(f"%{g_desc.strip()}%")
+            wh.append("description ILIKE %s"); pr.append(f"%{g_desc.strip()}%")
 
         sqlg = f"""
             select id, entry_date, kind, category_id, description, amount, method
@@ -951,14 +952,12 @@ def page_financeiro():
             card_end()
             return
 
-        # preparar colunas amigáveis
         id_to_label = {c["id"]: f"{c['name']} ({c['kind']})" for c in cats_all}
         label_to_id = {v: k for k, v in id_to_label.items()}
 
         df_g["categoria"] = df_g["category_id"].map(id_to_label).fillna("")
         df_g["Excluir?"] = False
 
-        # Config do editor
         colcfg = {
             "id": st.column_config.NumberColumn("ID", disabled=True),
             "entry_date": st.column_config.DateColumn("Data"),
@@ -986,16 +985,14 @@ def page_financeiro():
             refresh = st.button("🔄 Atualizar", key="gest_refresh")
 
         if refresh:
-            st.experimental_rerun()
+            _rerun()
 
         if aplicar:
-            # comparar com original
             orig = df_g.set_index("id")
             new = edited.set_index("id")
 
             upd, del_ids, err = 0, 0, 0
 
-            # exclusões
             to_delete = new.index[new["Excluir?"] == True].tolist()
             for _id in to_delete:
                 try:
@@ -1004,30 +1001,16 @@ def page_financeiro():
                 except Exception:
                     err += 1
 
-            # updates (somente linhas não marcadas para excluir)
             keep_ids = [i for i in new.index if i not in to_delete]
             for _id in keep_ids:
-                a = orig.loc[_id]
-                b = new.loc[_id]
+                a = orig.loc[_id]; b = new.loc[_id]
 
-                # detectar mudanças
-                changed = False
-                fields = ["entry_date","kind","categoria","method","description","amount"]
-                for f in fields:
-                    if str(a.get(f, "")) != str(b.get(f, "")):
-                        changed = True
-                        break
-
+                changed = any(str(a.get(f, "")) != str(b.get(f, "")) for f in
+                              ["entry_date","kind","categoria","method","description","amount"])
                 if not changed:
                     continue
 
-                # mapear categoria label -> id
-                new_cat_id = label_to_id.get(b["categoria"])
-                if not new_cat_id:
-                    # se inválida, mantenha antigo
-                    new_cat_id = int(a["category_id"])
-
-                # 'kind' segue o select do grid
+                new_cat_id = label_to_id.get(b["categoria"]) or int(a["category_id"])
                 new_kind = b["kind"] if b["kind"] in ("IN","OUT") else a["kind"]
 
                 try:
@@ -1035,16 +1018,16 @@ def page_financeiro():
                         update resto.cashbook
                            set entry_date=%s, kind=%s, category_id=%s, description=%s, amount=%s, method=%s
                          where id=%s;
-                    """, (b["entry_date"], new_kind, int(new_cat_id), (b["description"] or "")[:300], float(b["amount"]), b["method"], int(_id)))
+                    """, (b["entry_date"], new_kind, int(new_cat_id),
+                          (b["description"] or "")[:300], float(b["amount"]), b["method"], int(_id)))
                     upd += 1
                 except Exception:
                     err += 1
 
             st.success(f"✅ {upd} atualizado(s) • 🗑️ {del_ids} excluído(s) • ⚠️ {err} com erro.")
-            st.experimental_rerun()
+            _rerun()
 
         card_end()
-
 
 
 # ===================== Importar Extrato (CSV C6 / genérico) =====================
