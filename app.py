@@ -728,7 +728,8 @@ def page_estoque():
         else:
             st.caption("Nenhum lote dentro do período selecionado.")
         card_end()
-#---------------------FINANCEIRO-----------------------------------------
+
+# ===================== FINANCEIRO =====================
 def page_financeiro():
     header("💰 Financeiro", "Entradas, Saídas e DRE.")
     tabs = st.tabs(["💸 Entradas", "💳 Saídas", "📈 DRE", "⚙️ Gestão"])
@@ -818,7 +819,6 @@ def page_financeiro():
         with d2:
             dre_fim = st.date_input("Até", value=date.today(), key="dre_dtfim")
 
-        # Tenta DRE completa (vendas/CMV) se tabelas existirem.
         try:
             dt_end_next = dre_fim + timedelta(days=1)
             dre = qone("""
@@ -862,7 +862,6 @@ def page_financeiro():
             else:
                 raise RuntimeError("Sem dados")
         except Exception:
-            # Fallback: DRE apenas pelo livro-caixa
             tot_in = qone("""
                 select coalesce(sum(amount),0) s
                   from resto.cashbook
@@ -881,100 +880,171 @@ def page_financeiro():
             )
         card_end()
 
-    # ---------- Aba: Gestão (Editar / Excluir) ----------
+    # ---------- Aba: Gestão (Filtros + Grid editável) ----------
     with tabs[3]:
         card_start()
-        st.subheader("Gerenciar lançamentos (editar / excluir)")
-        with st.expander("Abrir gerenciador", expanded=False):
-            rows_cb = qall("""
-                select id, entry_date, kind, category_id, description, amount, method
-                  from resto.cashbook
-              order by entry_date desc, id desc
-              limit 500;
-            """)
-            if not rows_cb:
-                st.caption("Nenhum lançamento para gerenciar.")
-            else:
-                # Lista para escolher o lançamento
-                opts = [
-                    (int(r["id"]),
-                     f"#{r['id']} • {r['entry_date']} • {r.get('method') or ''} • "
-                     f"{str(r.get('description') or '')[:40]} • "
-                     f"{('+' if r['kind']=='IN' else '-')}{r['amount']}")
-                    for r in rows_cb
-                ]
-                sel = st.selectbox(
-                    "Selecione um lançamento",
-                    options=opts,
-                    format_func=lambda x: x[1] if isinstance(x, tuple) else x,
-                    key="cb_mgr_select"
-                )
-                sel_id = sel[0] if sel else None
+        st.subheader("Filtros")
 
-                if sel_id:
-                    cur = next((r for r in rows_cb if int(r["id"]) == sel_id), None)
-                    if cur:
-                        cats_all = qall("select id, name, kind from resto.cash_category order by name;")
-                        colA, colB, colC = st.columns(3)
-                        with colA:
-                            new_date = st.date_input(
-                                "Data",
-                                value=pd.to_datetime(cur["entry_date"]).date(),
-                                key=f"cb_date_{sel_id}"
-                            )
-                        with colB:
-                            cat_opts = [(c['id'], f"{c['name']} ({c['kind']})") for c in cats_all]
-                            try:
-                                idx = [c[0] for c in cat_opts].index(cur.get("category_id"))
-                            except Exception:
-                                idx = 0
-                            new_cat = st.selectbox(
-                                "Categoria",
-                                options=cat_opts,
-                                index=idx,
-                                format_func=lambda x: x[1] if isinstance(x, tuple) else x,
-                                key=f"cb_cat_{sel_id}"
-                            )
-                        with colC:
-                            methods2 = ['dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro']
-                            m0 = cur.get("method") or 'outro'
-                            i0 = methods2.index(m0) if m0 in methods2 else len(methods2) - 1
-                            new_method = st.selectbox(
-                                "Forma de pagamento",
-                                methods2,
-                                index=i0,
-                                key=f"cb_method_{sel_id}"
-                            )
+        # Filtros (Gestão lida com ambos os tipos)
+        colf1, colf2 = st.columns(2)
+        with colf1:
+            g_dtini = st.date_input("De", value=date.today().replace(day=1), key="gest_dtini")
+        with colf2:
+            g_dtfim = st.date_input("Até", value=date.today(), key="gest_dtfim")
 
-                        new_desc = st.text_input("Descrição", value=cur.get("description") or "",
-                                                 key=f"cb_desc_{sel_id}")
-                        new_amount = st.number_input("Valor", -1_000_000.0, 1_000_000.0,
-                                                     float(cur.get("amount") or 0.0), 0.01,
-                                                     key=f"cb_amount_{sel_id}")
+        # filtro de tipo (ambos / entradas / saídas)
+        kind_label = st.selectbox("Tipo", ["— ambos —", "Entradas (IN)", "Saídas (OUT)"], key="gest_kind")
+        if kind_label == "Entradas (IN)":
+            kind_filter = "IN"
+        elif kind_label == "Saídas (OUT)":
+            kind_filter = "OUT"
+        else:
+            kind_filter = None
 
-                        # Kind acompanha a categoria selecionada
-                        new_kind = 'IN' if '(IN)' in new_cat[1] else 'OUT'
+        # categorias (todas)
+        cats_all = qall("select id, name, kind from resto.cash_category order by name;") or []
+        cat_labels = ["— todas —"] + [f"{c['name']} ({c['kind']})" for c in cats_all]
+        cat_label_to_id = {"— todas —": 0}
+        for c in cats_all:
+            cat_label_to_id[f"{c['name']} ({c['kind']})"] = c["id"]
 
-                        col1b, col2b = st.columns(2)
-                        with col1b:
-                            salvar = st.button("💾 Salvar alterações", key=f"cb_save_{sel_id}")
-                        with col2b:
-                            excluir = st.button("🗑️ Excluir lançamento", key=f"cb_del_{sel_id}")
+        colf3, colf4, colf5 = st.columns([2, 1, 1])
+        with colf3:
+            g_cat_label = st.selectbox("Categoria", cat_labels, key="gest_cat")
+        with colf4:
+            g_method = st.selectbox("Método", METHODS, key="gest_method")
+        with colf5:
+            g_limit = st.number_input("Limite", 100, 5000, 1000, 100, key="gest_limit")
 
-                        if salvar:
-                            qexec("""
-                                update resto.cashbook
-                                   set entry_date=%s, kind=%s, category_id=%s, description=%s, amount=%s, method=%s
-                                 where id=%s;
-                            """, (new_date, new_kind, int(new_cat[0]), (new_desc or "")[:300], float(new_amount), new_method, sel_id))
-                            st.success("Lançamento atualizado.")
-                            st.experimental_rerun()
+        g_desc = st.text_input("Buscar texto na descrição", key="gest_desc")
 
-                        if excluir:
-                            qexec("delete from resto.cashbook where id=%s;", (sel_id,))
-                            st.success("Lançamento excluído.")
-                            st.experimental_rerun()
+        # Query com filtros
+        wh = ["entry_date >= %s", "entry_date <= %s"]
+        pr = [g_dtini, g_dtfim]
+        if kind_filter:
+            wh.append("kind = %s")
+            pr.append(kind_filter)
+        if g_cat_label and cat_label_to_id[g_cat_label] != 0:
+            wh.append("category_id = %s")
+            pr.append(cat_label_to_id[g_cat_label])
+        if g_method and g_method != '— todas —':
+            wh.append("method = %s")
+            pr.append(g_method)
+        if g_desc and g_desc.strip():
+            wh.append("description ILIKE %s")
+            pr.append(f"%{g_desc.strip()}%")
+
+        sqlg = f"""
+            select id, entry_date, kind, category_id, description, amount, method
+              from resto.cashbook
+             where {' and '.join(wh)}
+             order by entry_date desc, id desc
+             limit %s;
+        """
+        prg = tuple(pr + [int(g_limit)])
+        rows_g = qall(sqlg, prg) or []
+        df_g = pd.DataFrame(rows_g)
+
+        st.subheader("Grid editável")
+        if df_g.empty:
+            st.caption("Sem lançamentos para os filtros.")
+            card_end()
+            return
+
+        # preparar colunas amigáveis
+        id_to_label = {c["id"]: f"{c['name']} ({c['kind']})" for c in cats_all}
+        label_to_id = {v: k for k, v in id_to_label.items()}
+
+        df_g["categoria"] = df_g["category_id"].map(id_to_label).fillna("")
+        df_g["Excluir?"] = False
+
+        # Config do editor
+        colcfg = {
+            "id": st.column_config.NumberColumn("ID", disabled=True),
+            "entry_date": st.column_config.DateColumn("Data"),
+            "kind": st.column_config.SelectboxColumn("Tipo", options=["IN", "OUT"]),
+            "categoria": st.column_config.SelectboxColumn("Categoria", options=list(label_to_id.keys())),
+            "method": st.column_config.SelectboxColumn("Método", options=METHODS[1:]),
+            "description": st.column_config.TextColumn("Descrição"),
+            "amount": st.column_config.NumberColumn("Valor", step=0.01, format="%.2f"),
+            "Excluir?": st.column_config.CheckboxColumn("Excluir?", help="Marque para excluir este lançamento"),
+        }
+
+        edited = st.data_editor(
+            df_g[["id","entry_date","kind","categoria","method","description","amount","Excluir?"]],
+            column_config=colcfg,
+            num_rows="fixed",
+            hide_index=True,
+            key="gest_editor",
+            use_container_width=True
+        )
+
+        colb1, colb2 = st.columns(2)
+        with colb1:
+            aplicar = st.button("💾 Aplicar alterações", key="gest_apply")
+        with colb2:
+            refresh = st.button("🔄 Atualizar", key="gest_refresh")
+
+        if refresh:
+            st.experimental_rerun()
+
+        if aplicar:
+            # comparar com original
+            orig = df_g.set_index("id")
+            new = edited.set_index("id")
+
+            upd, del_ids, err = 0, 0, 0
+
+            # exclusões
+            to_delete = new.index[new["Excluir?"] == True].tolist()
+            for _id in to_delete:
+                try:
+                    qexec("delete from resto.cashbook where id=%s;", (_id,))
+                    del_ids += 1
+                except Exception:
+                    err += 1
+
+            # updates (somente linhas não marcadas para excluir)
+            keep_ids = [i for i in new.index if i not in to_delete]
+            for _id in keep_ids:
+                a = orig.loc[_id]
+                b = new.loc[_id]
+
+                # detectar mudanças
+                changed = False
+                fields = ["entry_date","kind","categoria","method","description","amount"]
+                for f in fields:
+                    if str(a.get(f, "")) != str(b.get(f, "")):
+                        changed = True
+                        break
+
+                if not changed:
+                    continue
+
+                # mapear categoria label -> id
+                new_cat_id = label_to_id.get(b["categoria"])
+                if not new_cat_id:
+                    # se inválida, mantenha antigo
+                    new_cat_id = int(a["category_id"])
+
+                # 'kind' segue o select do grid
+                new_kind = b["kind"] if b["kind"] in ("IN","OUT") else a["kind"]
+
+                try:
+                    qexec("""
+                        update resto.cashbook
+                           set entry_date=%s, kind=%s, category_id=%s, description=%s, amount=%s, method=%s
+                         where id=%s;
+                    """, (b["entry_date"], new_kind, int(new_cat_id), (b["description"] or "")[:300], float(b["amount"]), b["method"], int(_id)))
+                    upd += 1
+                except Exception:
+                    err += 1
+
+            st.success(f"✅ {upd} atualizado(s) • 🗑️ {del_ids} excluído(s) • ⚠️ {err} com erro.")
+            st.experimental_rerun()
+
         card_end()
+
 
 
 # ===================== Importar Extrato (CSV C6 / genérico) =====================
