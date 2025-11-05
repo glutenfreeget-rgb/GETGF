@@ -85,14 +85,14 @@ def qall(sql: str, params: Optional[Tuple]=None) -> List[Dict[str, Any]]:
                     cur.execute(sql)
                 else:
                     cur.execute(sql, params)
-return cur.fetchall()
+                return cur.fetchall()
         else:
             with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 if params is None:
                     cur.execute(sql)
                 else:
                     cur.execute(sql, params)
-return cur.fetchall()
+                return cur.fetchall()
 
 def qone(sql: str, params: Optional[Tuple]=None) -> Optional[Dict[str, Any]]:
     rows = qall(sql, params)
@@ -106,14 +106,17 @@ def qexec(sql: str, params: Optional[Tuple]=None) -> int:
                     cur.execute(sql)
                 else:
                     cur.execute(sql, params)
-return cur.rowcount or 0
+                return cur.rowcount or 0
         else:
             with con.cursor() as cur:
                 if params is None:
                     cur.execute(sql)
                 else:
                     cur.execute(sql, params)
-return cur.rowcount or 0
+                try:
+                    return cur.rowcount or 0
+                except Exception:
+                    return 0
 
 def safe_qall(sql: str, params: Optional[Tuple]=None) -> List[Dict[str, Any]]:
     try:
