@@ -1087,47 +1087,97 @@ def _load_c6_csv(raw: bytes) -> pd.DataFrame:
         return pd.DataFrame()
     csv_body = "\n".join(lines[start:])
     df = pd.read_csv(StringIO(csv_body), sep=",", dtype=str, keep_default_na=False)
+
+    # Mapeia nomes (com e sem acentos, se necessário)
+    def _col(*names):
+        for n in names:
+            if n in df.columns:
+                return n
+        return None
+
+    col_date = _col("Data Lançamento", "Data Lancamento")
+    col_tit  = _col("Título", "Titulo", "Title")
+    col_desc = _col("Descrição", "Descricao", "Description")
+    col_ent  = _col("Entrada(R$)", "Credito", "Crédito", "Credit")
+    col_sai  = _col("Saída(R$)", "Saida(R$)", "Debito", "Débito", "Debit")
+
+    if not (col_date and col_ent and col_sai and (col_tit or col_desc)):
+        return pd.DataFrame()
+
     out = pd.DataFrame({
-        "entry_date": pd.to_datetime(df["Data Lançamento"], dayfirst=True, errors="coerce").dt.date,
-        "description": df["Descrição"].astype(str),
+        "entry_date": pd.to_datetime(df[col_date], dayfirst=True, errors="coerce").dt.date,
+        "description_main": (df[col_desc].astype(str) if col_desc else ""),
+        "description_alt":  (df[col_tit].astype(str)  if col_tit  else ""),
     })
-    out["amount"] = df["Entrada(R$)"].apply(_parse_brl_amount) - df["Saída(R$)"].apply(_parse_brl_amount)
+
+    # `description` = junção (Título | Descrição), mas se só tiver uma, usa a que houver
+    out["description"] = (
+        out["description_alt"].str.strip() + " | " + out["description_main"].str.strip()
+    ).str.strip(" |")
+
+    out["amount"] = df[col_ent].apply(_parse_brl_amount) - df[col_sai].apply(_parse_brl_amount)
     return out.dropna(subset=["entry_date"])
+
 
 def _load_csv_generic(raw: bytes) -> pd.DataFrame:
     from io import StringIO
     txt = _read_text_guess(raw)
     if not txt:
         return pd.DataFrame()
-    first = txt.splitlines()[0]
+    # tenta inferir separador pela 1ª linha
+    first = txt.splitlines()[0] if txt.splitlines() else ""
     sep = _guess_sep(first)
     df = pd.read_csv(StringIO(txt), sep=sep, dtype=str, keep_default_na=False)
+
+    # Mapa simples por lowercase (mantendo acentos se houver)
     cols = {c.lower(): c for c in df.columns}
-    entry_col = cols.get("data") or cols.get("date") or cols.get("data lançamento") or cols.get("entry_date")
-    desc_col = cols.get("descrição") or cols.get("descricao") or cols.get("description") or cols.get("histórico") or cols.get("historico")
-    # tenta amount direto
-    val_col  = cols.get("valor") or cols.get("amount")
-    # ou entrada-saida
-    ent_col  = cols.get("entrada(r$)") or cols.get("credito") or cols.get("crédito")
-    sai_col  = cols.get("saída(r$)") or cols.get("debito") or cols.get("débito")
 
-    if entry_col and desc_col and val_col:
-        out = pd.DataFrame({
-            "entry_date": pd.to_datetime(df[entry_col], dayfirst=True, errors="coerce").dt.date,
-            "description": df[desc_col].astype(str),
-            "amount": df[val_col].apply(_parse_brl_amount)
-        })
-        return out.dropna(subset=["entry_date"])
+    # Coluna de data
+    entry_col = (cols.get("data") or cols.get("date") or cols.get("data lançamento")
+                 or cols.get("data lancamento") or cols.get("entry_date"))
+    if not entry_col:
+        return pd.DataFrame()
 
-    if entry_col and desc_col and ent_col and sai_col:
-        out = pd.DataFrame({
-            "entry_date": pd.to_datetime(df[entry_col], dayfirst=True, errors="coerce").dt.date,
-            "description": df[desc_col].astype(str),
-        })
-        out["amount"] = df[ent_col].apply(_parse_brl_amount) - df[sai_col].apply(_parse_brl_amount)
-        return out.dropna(subset=["entry_date"])
+    # Candidatas de descrição principal e alternativa
+    cand_main = [
+        "descrição","descricao","description","histórico","historico","memo","narrativa"
+    ]
+    cand_alt = [
+        "título","titulo","title","detalhe","detalhes","complemento","observação","observacao"
+    ]
+    desc_col = next((cols[c] for c in cand_main if c in cols), None)
+    alt_col  = next((cols[c] for c in cand_alt  if c in cols and cols[c] != desc_col), None)
 
-    return pd.DataFrame()
+    # Valores: uma coluna 'valor/amount' OU par crédito/débito
+    val_col = cols.get("valor") or cols.get("amount")
+    ent_col = (cols.get("entrada(r$)") or cols.get("credito") or cols.get("crédito") or cols.get("credit"))
+    sai_col = (cols.get("saída(r$)") or cols.get("saida(r$)") or cols.get("debito") or cols.get("débito") or cols.get("debit"))
+
+    if not (desc_col or alt_col):
+        # se não achar nenhuma descritiva, tente usar qualquer 'título'
+        desc_col = alt_col or next((cols[c] for c in ("titulo","título","title","description") if c in cols), None)
+
+    # monta base
+    base = pd.DataFrame({
+        "entry_date": pd.to_datetime(df[entry_col], dayfirst=True, errors="coerce").dt.date,
+        "description_main": df[desc_col].astype(str) if desc_col else "",
+        "description_alt":  df[alt_col].astype(str)  if alt_col  else "",
+    })
+
+    # description combinada (alt | main) quando existir, senão usa apenas uma
+    base["description"] = (
+        base["description_alt"].str.strip() + " | " + base["description_main"].str.strip()
+    ).str.strip(" |")
+
+    if val_col:
+        base["amount"] = df[val_col].apply(_parse_brl_amount)
+    elif ent_col and sai_col:
+        base["amount"] = df[ent_col].apply(_parse_brl_amount) - df[sai_col].apply(_parse_brl_amount)
+    else:
+        return pd.DataFrame()
+
+    return base.dropna(subset=["entry_date"])
+
 
 def _load_bank_file(up) -> pd.DataFrame:
     raw = up.read()
