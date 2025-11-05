@@ -1,5 +1,6 @@
 
 import os
+import unicodedata
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,10 +36,11 @@ st.markdown("""
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     .kpi { font-variant-numeric: tabular-nums; }
 </style>
-""", unsafe_allow_html=True)
+"""", unsafe_allow_html=True)
 
 # ===================== DB Helpers =====================
 def _get_conn():
+    # Prefer st.secrets if available
     host = st.secrets.get("DB_HOST", os.getenv("DB_HOST", ""))
     port = st.secrets.get("DB_PORT", os.getenv("DB_PORT", "5432"))
     user = st.secrets.get("DB_USER", os.getenv("DB_USER", ""))
@@ -56,19 +58,21 @@ def _get_conn():
 def qall(sql: str, params: Optional[Tuple]=None) -> List[Dict[str, Any]]:
     with _get_conn() as con, con.cursor() as cur:
         cur.execute(sql, params or ())
-        return cur.fetchall()
+        rows = cur.fetchall()
+    return rows
 
 def qone(sql: str, params: Optional[Tuple]=None) -> Optional[Dict[str, Any]]:
     with _get_conn() as con, con.cursor() as cur:
         cur.execute(sql, params or ())
-        return cur.fetchone()
+        row = cur.fetchone()
+    return row
 
 def qexec(sql: str, params: Optional[Tuple]=None) -> int:
     with _get_conn() as con, con.cursor() as cur:
         cur.execute(sql, params or ())
         return cur.rowcount or 0
 
-# ===================== Ensure & Migrations =====================
+# ===================== Ensure Schema (ping) =====================
 def ensure_ping():
     try:
         qone("select 1;")
@@ -77,125 +81,27 @@ def ensure_ping():
         st.error(f"Erro de conexão: {e}")
         return False
 
-def ensure_migrations():
-    # Produção (ordem de produção) e índices úteis
-    qexec("""
-    create table if not exists resto.production (
-      id           bigserial primary key,
-      date         timestamptz not null default now(),
-      product_id   bigint not null references resto.product(id),
-      qty          numeric(18,6) not null,
-      unit_cost    numeric(18,6) not null default 0,
-      total_cost   numeric(18,6) not null default 0,
-      lot_number   text,
-      expiry_date  date,
-      note         text
-    );
-    """)
-    qexec("""
-    create table if not exists resto.production_item (
-      id              bigserial primary key,
-      production_id   bigint not null references resto.production(id) on delete cascade,
-      ingredient_id   bigint not null references resto.product(id),
-      lot_id          bigint references resto.purchase_item(id),
-      qty             numeric(18,6) not null,
-      unit_cost       numeric(18,6) not null default 0,
-      total_cost      numeric(18,6) not null default 0
-    );
-    """)
-    qexec("""create index if not exists invmov_ref_idx on resto.inventory_movement(reference_id);""")
-
 # ===================== UI Helpers =====================
 def header(title: str, subtitle: Optional[str] = None):
-    st.markdown(
-        f"<div class='modern-header'><h2 style='margin:0'>{title}</h2>" +
-        (f"<div class='muted'>{subtitle}</div>" if subtitle else "") +
-        "</div>", unsafe_allow_html=True
-    )
+    st.markdown(f"<div class='modern-header'><h2 style='margin:0'>{title}</h2>" +
+                (f"<div class='muted'>{subtitle}</div>" if subtitle else "") +
+                "</div>", unsafe_allow_html=True)
 
 def card_start(): st.markdown("<div class='modern-card'>", unsafe_allow_html=True)
 def card_end():   st.markdown("</div>", unsafe_allow_html=True)
 
-def money(v: float) -> str:
-    return ("R$ {:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", ".")
-
-# ===================== Domain Helpers =====================
-def lot_balances_for_product(product_id: int) -> pd.DataFrame:
-    """Retorna saldos por lote (purchase_item) para um produto.
-       saldo = qty_lote - sum(OUT movements com reference_id=lot_id)"""
-    rows = qall("""
-      with cons as (
-        select reference_id as lot_id, coalesce(sum(qty),0) as qty_out
-          from resto.inventory_movement
-         where kind='OUT' and reference_id is not null
-         group by reference_id
-      )
-      select pi.id as lot_id, pi.product_id, p.name as product_name,
-             pi.qty as lot_qty, pi.unit_id,
-             pi.unit_price, pi.expiry_date, pi.lot_number,
-             coalesce(c.qty_out,0) as consumed,
-             greatest(pi.qty - coalesce(c.qty_out,0), 0) as saldo
-        from resto.purchase_item pi
-        join resto.product p on p.id = pi.product_id
-        left join cons c on c.lot_id = pi.id
-       where pi.product_id = %s
-       order by pi.expiry_date nulls last, pi.id asc;
-    """, (product_id,))
-    return pd.DataFrame(rows)
-
-def fifo_allocate(product_id: int, required_qty: float) -> List[Dict[str, Any]]:
-    """Aloca quantidade necessária por lotes (FIFO por validade, depois id)."""
-    df = lot_balances_for_product(product_id)
-    alloc = []
-    remaining = float(required_qty or 0.0)
-    for _, r in df.iterrows():
-        if remaining <= 0:
-            break
-        avail = float(r["saldo"] or 0.0)
-        if avail <= 0:
-            continue
-        take = min(avail, remaining)
-        alloc.append({
-            "lot_id": int(r["lot_id"]),
-            "qty": take,
-            "unit_cost": float(r["unit_price"] or 0.0),
-            "expiry_date": r.get("expiry_date"),
-            "lot_number": r.get("lot_number"),
-        })
-        remaining -= take
-    return alloc
-
 # ===================== Pages =====================
 
 def page_dashboard():
-    header("📊 Painel", "Visão geral do financeiro, estoque e validade.")
+    header("📊 Painel", "Visão geral do financeiro e estoque.")
     col1, col2, col3 = st.columns(3)
 
-    stock = qone("select coalesce(sum(stock_qty * avg_cost),0) as val, coalesce(sum(stock_qty),0) as qty from resto.product;") or {}
+    stock = qone("select coalesce(sum(stock_qty * avg_cost),0) as val, coalesce(sum(stock_qty),0) as qty from resto.product;" ) or {}
     cmv = qall("select month, cmv_value from resto.v_cmv order by month desc limit 6;")
-    soon = qall("""
-        with cons as (
-          select reference_id as lot_id, coalesce(sum(qty),0) as qty_out
-            from resto.inventory_movement
-           where kind='OUT' and reference_id is not null
-           group by reference_id
-        )
-        select pi.id, p.name, pi.expiry_date,
-               greatest(pi.qty - coalesce(c.qty_out,0),0) as saldo,
-               (pi.expiry_date - current_date) as dias
-          from resto.purchase_item pi
-          join resto.product p on p.id = pi.product_id
-          left join cons c on c.lot_id = pi.id
-         where pi.expiry_date is not null
-           and (pi.expiry_date - current_date) <= 30
-           and greatest(pi.qty - coalesce(c.qty_out,0),0) > 0
-         order by pi.expiry_date asc
-         limit 10;
-    """)
 
     with col1:
         card_start()
-        st.markdown("**Valor do Estoque (CMP)**\n\n<h3 class='kpi'>{}</h3>".format(money(stock.get('val',0))), unsafe_allow_html=True)
+        st.markdown("**Valor do Estoque (CMP)**\n\n<h3 class='kpi'>R$ {:,.2f}</h3>".format(stock.get('val',0)).replace(',', 'X').replace('.', ',').replace('X','.'), unsafe_allow_html=True)
         st.caption("Quantidade total em estoque: {:.2f}".format(stock.get('qty',0)))
         card_end()
 
@@ -204,7 +110,7 @@ def page_dashboard():
         st.markdown("**Últimos CMVs (mensal)**")
         df = pd.DataFrame(cmv)
         if not df.empty:
-            df["month"] = df["month"].dt.strftime("%Y-%m")
+            df['month'] = df['month'].dt.strftime('%Y-%m')
             st.dataframe(df, use_container_width=True, hide_index=True)
         else:
             st.caption("Sem dados de CMV ainda.")
@@ -212,13 +118,8 @@ def page_dashboard():
 
     with col3:
         card_start()
-        st.markdown("**Vencimentos em 30 dias**")
-        df = pd.DataFrame(soon)
-        if not df.empty:
-            df["dias"] = df["dias"].astype(int)
-            st.dataframe(df[["name","expiry_date","saldo","dias"]], use_container_width=True, hide_index=True)
-        else:
-            st.caption("Nenhum lote a vencer nos próximos 30 dias.")
+        today_sales = qone("select coalesce(sum(total),0) as tot from resto.sale where date::date = current_date and status='FECHADA';") or {}
+        st.markdown("**Vendas Hoje (fechadas)**\n\n<h3 class='kpi'>R$ {:,.2f}</h3>".format(today_sales.get('tot',0)).replace(',', 'X').replace('.', ',').replace('X','.'), unsafe_allow_html=True)
         card_end()
 
 def page_cadastros():
@@ -289,7 +190,7 @@ def page_cadastros():
             category_id = st.selectbox("Categoria", options=[(c['id'], c['name']) for c in cats], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if cats else None)
             unit_id = st.selectbox("Unidade *", options=[(u['id'], u['abbr']) for u in units], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if units else None)
 
-            st.markdown("**Campos fiscais (opcional)**")
+            st.markdown("**Campos fiscais (opcional agora; útil para emissão de documentos)**")
             colf1, colf2, colf3, colf4 = st.columns(4)
             with colf1:
                 ncm = st.text_input("NCM") ; cest = st.text_input("CEST")
@@ -336,23 +237,23 @@ def page_cadastros():
         card_end()
 
 def page_compras():
-    header("📥 Compras", "Lançar notas e lotes com validade.")
+    header("📥 Compras", "Lançar notas de entrada e atualizar estoque (CMP)." )
     suppliers = qall("select id, name from resto.supplier order by name;")
-    prods = qall("select id, name, unit_id from resto.product order by name;" )
+    prods = qall("select id, name from resto.product order by name;" )
     units = qall("select id, abbr from resto.unit order by abbr;" )
 
     card_start()
     with st.form("form_compra"):
-        supplier = st.selectbox("Fornecedor *", options=[(s['id'], s['name']) for s in suppliers], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+        supplier = st.selectbox("Fornecedor *", options=[(s['id'], s['name']) for s in suppliers], format_func=lambda x: x[1])
         doc_number = st.text_input("Número do documento")
         cfop_ent = st.text_input("CFOP Entrada", value="1102")
         doc_date = st.date_input("Data", value=date.today())
         freight = st.number_input("Frete", 0.00, 9999999.99, 0.00, 0.01)
         other = st.number_input("Outros custos", 0.00, 9999999.99, 0.00, 0.01)
 
-        st.markdown("**Itens da compra (cada item é um LOTE)**")
+        st.markdown("**Itens da compra**")
         if "compra_itens" not in st.session_state:
-            st.session_state["compra_itens"] = []
+            st.session_state["compra_itens"] = []  # list of dicts
 
         with st.expander("Adicionar item"):
             prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1])
@@ -360,7 +261,7 @@ def page_compras():
             qty = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1)
             unit_price = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01)
             discount = st.number_input("Desconto", 0.0, 1_000_000.0, 0.0, 0.01)
-            lote = st.text_input("Lote (opcional)")
+            lote = st.text_input("Lote")
             expiry = st.date_input("Validade", value=None)
             add = st.button("Adicionar à lista")
             if add and prod and unit and qty>0:
@@ -369,21 +270,22 @@ def page_compras():
                     "product_id": prod[0], "product_name": prod[1],
                     "unit_id": unit[0], "unit_abbr": unit[1],
                     "qty": qty, "unit_price": unit_price, "discount": discount,
-                    "total": total, "lot_number": lote or None, "expiry_date": str(expiry) if expiry else None
+                    "total": total, "lot_number": lote, "expiry_date": str(expiry) if expiry else None
                 })
-                st.success("Item adicionado!" )
+                st.success("Item adicionado!" );
 
-        df = pd.DataFrame(st.session_state["compra_itens"]) if st.session_state["compra_itens"] else pd.DataFrame(columns=["product_name","qty","unit_abbr","unit_price","discount","total","expiry_date"])
+        df = pd.DataFrame(st.session_state["compra_itens"]) if st.session_state["compra_itens"] else pd.DataFrame(columns=["product_name","qty","unit_abbr","unit_price","discount","total"])
         st.dataframe(df, use_container_width=True, hide_index=True)
 
         total_doc = float(df["total"].sum()) if not df.empty else 0.0
-        st.markdown(f"**Total itens:** {money(total_doc)}")
+        st.markdown(f"**Total itens:** R$ {total_doc:,.2f}".replace(',', 'X').replace('.', ',').replace('X','.'))
 
         submit = st.form_submit_button("Lançar compra e atualizar estoque" )
 
     card_end()
 
     if submit and supplier and doc_date and df is not None:
+        # Cria header da compra
         pid = supplier[0]
         row = qone("""
             insert into resto.purchase(supplier_id, doc_number, cfop_entrada, doc_date, freight_value, other_costs, total, status)
@@ -391,17 +293,16 @@ def page_compras():
             returning id;
         """, (pid, doc_number, cfop_ent, doc_date, freight, other, total_doc))
         purchase_id = row["id"]
+        # Insere itens + movimenta estoque via sp
         for it in st.session_state["compra_itens"]:
-            rowi = qone("""
+            qexec("""
                 insert into resto.purchase_item(
                   purchase_id, product_id, qty, unit_id, unit_price, discount, total, lot_number, expiry_date
-                ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                returning id;
+                ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s);
             """, (purchase_id, it["product_id"], it["qty"], it["unit_id"], it["unit_price"], it["discount"], it["total"], it["lot_number"], it["expiry_date"]))
-            lot_id = rowi["id"]
-            # registra movimento IN por lote
-            note = f"lote:{lot_id}" + (f";exp:{it['expiry_date']}" if it["expiry_date"] else "")
-            qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'purchase',%s,%s);", (it["product_id"], it["qty"], it["unit_price"], lot_id, note))
+
+            # registra movimento IN e atualiza CMP
+            qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'purchase',%s,%s);", (it["product_id"], it["qty"], it["unit_price"], purchase_id, f"lote {it['lot_number'] or ''}"))
 
         st.session_state["compra_itens"] = []
         st.success(f"Compra #{purchase_id} lançada e estoque atualizado!" )
@@ -428,7 +329,7 @@ def page_vendas():
         df = pd.DataFrame(st.session_state["sale_itens"]) if st.session_state["sale_itens"] else pd.DataFrame(columns=["product_name","qty","unit_price","total"])
         st.dataframe(df, use_container_width=True, hide_index=True)
         total = float(df["total"].sum()) if not df.empty else 0.0
-        st.markdown(f"**Total da venda:** {money(total)}")
+        st.markdown(f"**Total da venda:** R$ {total:,.2f}".replace(',', 'X').replace('.', ',').replace('X','.'))
 
         submit = st.form_submit_button("Fechar venda e dar baixa no estoque" )
     card_end()
@@ -438,7 +339,7 @@ def page_vendas():
         sale_id = row["id"]
         for it in st.session_state["sale_itens"]:
             qexec("insert into resto.sale_item(sale_id, product_id, qty, unit_price, total) values (%s,%s,%s,%s,%s);", (sale_id, it["product_id"], it["qty"], it["unit_price"], it["total"]) )
-            # Saída usa CMP atual (sp cuidará), sem amarrar lote neste MVP de venda
+            # Saída usa CMP atual
             qexec("select resto.sp_register_movement(%s,'OUT',%s,null,'sale',%s,%s);", (it["product_id"], it["qty"], sale_id, ''))
         st.session_state["sale_itens"] = []
         st.success(f"Venda #{sale_id} fechada e estoque baixado!" )
@@ -495,7 +396,7 @@ def page_receitas_precos():
                 # custo estimado (view)
                 cost = qone("select * from resto.v_recipe_cost where product_id=%s;", (prod[0],))
                 if cost:
-                    st.markdown(f"**Custo do lote:** {money(cost['batch_cost'])} • **Custo unitário estimado:** {money(cost['unit_cost_estimated'])}")
+                    st.markdown(f"**Custo do lote:** R$ {cost['batch_cost']:,.2f} • **Custo unitário estimado:** R$ {cost['unit_cost_estimated']:,.2f}".replace(',', 'X').replace('.', ',').replace('X','.'))
                 else:
                     st.caption("Adicione ingredientes para ver o custo.")
         card_end()
@@ -509,7 +410,7 @@ def page_receitas_precos():
             rec = qone("select unit_cost_estimated from resto.v_recipe_cost where product_id=%s;", (prod[0],))
             avg = qone("select avg_cost from resto.product where id=%s;", (prod[0],))
             base_cost = rec['unit_cost_estimated'] if rec and rec['unit_cost_estimated'] else (avg['avg_cost'] if avg else 0.0)
-            st.markdown(f"**Custo base (estimado ou CMP):** {money(base_cost)}")
+            st.markdown(f"**Custo base (estimado ou CMP):** R$ {base_cost:,.2f}".replace(',', 'X').replace('.', ',').replace('X','.'))
 
             col1, col2, col3, col4 = st.columns(4)
             with col1:
@@ -524,116 +425,12 @@ def page_receitas_precos():
             preco_sugerido = base_cost * (1 + (markup/100.0))
             preco_liquido = preco_sugerido * (1 - desconto/100.0) * (1 - taxa_cartao/100.0) * (1 - impostos/100.0)
 
-            st.markdown(f"**Preço sugerido:** {money(preco_sugerido)} • **Receita líquida estimada:** {money(preco_liquido)}")
+            st.markdown(f"**Preço sugerido:** R$ {preco_sugerido:,.2f} • **Receita líquida estimada:** R$ {preco_liquido:,.2f}".replace(',', 'X').replace('.', ',').replace('X','.'))
         card_end()
-
-def page_producao():
-    header("🍳 Produção", "Ordem de produção: consome ingredientes (por lote) e gera produto final.")
-    prods = qall("select id, name from resto.product order by name;")
-    units = {r["id"]: r["abbr"] for r in qall("select id, abbr from resto.unit;")}
-
-    card_start()
-    st.subheader("Nova produção")
-    prod = st.selectbox("Produto final *", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1])
-    if not prod:
-        card_end()
-        return
-
-    recipe = qone("select * from resto.recipe where product_id=%s;", (prod[0],))
-    if not recipe:
-        st.warning("Este produto não possui ficha técnica (receita). Cadastre em 'Receitas & Preços'.")
-        card_end()
-        return
-
-    yield_qty = float(recipe["yield_qty"] or 0.0)
-    if yield_qty <= 0:
-        st.error("Ficha técnica inválida: rendimento deve ser > 0.")
-        card_end()
-        return
-
-    with st.form("form_producao"):
-        qty_out = st.number_input("Quantidade a produzir (na unidade do produto)", 0.0, 1_000_000.0, 10.0, 0.1)
-        lot_final = st.text_input("Lote do produto final (opcional)")
-        expiry_final = st.date_input("Validade do produto final", value=None)
-        ok = st.form_submit_button("Produzir")
-
-    if not ok or qty_out <= 0:
-        card_end()
-        return
-
-    # Carrega ingredientes da receita
-    ingredients = qall("""
-        select ri.ingredient_id, p.name as ingrediente, ri.qty, ri.conversion_factor, ri.unit_id
-          from resto.recipe_item ri
-          join resto.product p on p.id = ri.ingredient_id
-         where ri.recipe_id=%s
-         order by p.name;
-    """, (recipe["id"],))
-
-    scale = qty_out / yield_qty
-    # Aloca por lotes e calcula custo
-    consumos = []  # list of dicts: ingredient_id, lot_id, qty, unit_cost, total
-    total_ing_cost = 0.0
-    falta = []
-
-    for it in ingredients:
-        need = float(it["qty"] or 0.0) * float(it["conversion_factor"] or 1.0) * scale
-        allocs = fifo_allocate(it["ingredient_id"], need)
-        allocated = sum(a["qty"] for a in allocs)
-        if allocated + 1e-9 < need:
-            falta.append((it["ingrediente"], need, allocated))
-        for a in allocs:
-            total = a["qty"] * float(a["unit_cost"] or 0.0)
-            consumos.append({
-                "ingredient_id": it["ingredient_id"],
-                "ingrediente": it["ingrediente"],
-                "lot_id": a["lot_id"],
-                "qty": a["qty"],
-                "unit_cost": a["unit_cost"],
-                "total": total
-            })
-            total_ing_cost += total
-
-    if falta:
-        st.error("Estoque insuficiente para os ingredientes:\n" + "\n".join([f"- {n}: precisa {q:.3f}, alocado {a:.3f}" for n,q,a in falta]))
-        card_end()
-        return
-
-    # Calcula custo do lote final
-    overhead = float(recipe["overhead_pct"] or 0.0) / 100.0
-    loss = float(recipe["loss_pct"] or 0.0) / 100.0
-    batch_cost = total_ing_cost * (1 + overhead) * (1 + loss)
-    unit_cost_est = batch_cost / qty_out if qty_out > 0 else 0.0
-
-    # Persiste produção
-    prow = qone("""
-        insert into resto.production(date, product_id, qty, unit_cost, total_cost, lot_number, expiry_date, note)
-        values (now(), %s, %s, %s, %s, %s, %s, %s)
-        returning id;
-    """, (prod[0], qty_out, unit_cost_est, batch_cost, (lot_final or None), (str(expiry_final) if expiry_final else None), ""))
-    production_id = prow["id"]
-
-    # Registra consumo de ingredientes (OUT) por lote
-    for c in consumos:
-        pi = qone("""
-            insert into resto.production_item(production_id, ingredient_id, lot_id, qty, unit_cost, total_cost)
-            values (%s,%s,%s,%s,%s,%s)
-            returning id;
-        """, (production_id, c["ingredient_id"], c["lot_id"], c["qty"], c["unit_cost"], c["total"]))
-        note = f"production:{production_id};lot:{c['lot_id']}"
-        qexec("select resto.sp_register_movement(%s,'OUT',%s,%s,'production',%s,%s);", (c["ingredient_id"], c["qty"], c["unit_cost"], pi["id"], note))
-
-    # Registra entrada do produto final (IN)
-    note_final = f"production:{production_id}" + (f";lot:{lot_final}" if lot_final else "")
-    qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'production',%s,%s);", (prod[0], qty_out, unit_cost_est, production_id, note_final))
-
-    st.success(f"Produção #{production_id} registrada. CMP do produto final atualizado.")
-    st.markdown(f"**Custo do lote:** {money(batch_cost)} • **Custo unitário aplicado no CMP:** {money(unit_cost_est)}")
-    card_end()
 
 def page_estoque():
-    header("📦 Estoque", "Saldos, movimentos e lotes/validade.")
-    tabs = st.tabs(["Saldos", "Movimentos", "Lotes & Validade"]) 
+    header("📦 Estoque", "Saldos, valorização (CMP) e movimentos.")
+    tabs = st.tabs(["Saldos", "Movimentos"]) 
 
     with tabs[0]:
         card_start()
@@ -646,35 +443,6 @@ def page_estoque():
         st.subheader("Movimentações recentes" )
         mv = qall("select move_date, kind, product_id, qty, unit_cost, total_cost, reason, reference_id, note from resto.inventory_movement order by move_date desc limit 500;" )
         st.dataframe(pd.DataFrame(mv), use_container_width=True, hide_index=True)
-        card_end()
-
-    with tabs[2]:
-        card_start()
-        st.subheader("Alertas de validade e saldos por lote")
-        dias = st.slider("Dias até o vencimento", 7, 120, 30, 1)
-        rows = qall(f"""
-            with cons as (
-              select reference_id as lot_id, coalesce(sum(qty),0) as qty_out
-                from resto.inventory_movement
-               where kind='OUT' and reference_id is not null
-               group by reference_id
-            )
-            select pi.id as lot_id, p.name, pi.qty as lote, coalesce(c.qty_out,0) as consumido,
-                   greatest(pi.qty - coalesce(c.qty_out,0),0) as saldo,
-                   pi.unit_price, pi.expiry_date, (pi.expiry_date - current_date) as dias_restantes
-              from resto.purchase_item pi
-              join resto.product p on p.id = pi.product_id
-              left join cons c on c.lot_id = pi.id
-             where pi.expiry_date is not null
-               and (pi.expiry_date - current_date) <= %s
-             order by pi.expiry_date asc;
-        """, (dias,))
-        df = pd.DataFrame(rows)
-        if not df.empty:
-            df["dias_restantes"] = df["dias_restantes"].astype(int)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.caption("Nenhum lote dentro do período selecionado.")
         card_end()
 
 def page_financeiro():
@@ -691,7 +459,7 @@ def page_financeiro():
 
         with st.form("form_caixa"):
             dt = st.date_input("Data", value=date.today())
-            cat = st.selectbox("Categoria", options=[(c['id'], f\"{c['name']} ({c['kind']})\") for c in cats], format_func=lambda x: x[1])
+            cat = st.selectbox("Categoria", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats], format_func=lambda x: x[1])
             kind = 'IN' if '(IN)' in cat[1] else 'OUT'
             desc = st.text_input("Descrição")
             val  = st.number_input("Valor", 0.00, 1_000_000.00, 0.00, 0.01)
@@ -718,11 +486,12 @@ def page_financeiro():
         """)
         if dre:
             st.markdown(
-                f"Receita: {money(dre['v'])}  \n"
-                f"CMV: {money(dre['c'])}  \n"
-                f"Despesas: {money(dre['d'])}  \n"
-                f"Outros: {money(dre['o'])}  \n"
-                f"**Resultado:** {money(dre['resultado'])}",
+                f"Receita: R$ {dre['v']:,.2f}  \\n"
+                f"CMV: R$ {dre['c']:,.2f}  \\n"
+                f"Despesas: R$ {dre['d']:,.2f}  \\n"
+                f"Outros: R$ {dre['o']:,.2f}  \\n"
+                f"**Resultado:** R$ {dre['resultado']:,.2f}"
+                .replace(',', 'X').replace('.', ',').replace('X','.'),
                 unsafe_allow_html=False
             )
         else:
@@ -733,17 +502,15 @@ def page_financeiro():
 def main():
     if not ensure_ping():
         st.stop()
-    ensure_migrations()
 
-    header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")    
-    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro"], index=0)
+    header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços")    
+    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Estoque", "Financeiro"], index=0)
 
     if page == "Painel": page_dashboard()
     elif page == "Cadastros": page_cadastros()
     elif page == "Compras": page_compras()
     elif page == "Vendas": page_vendas()
     elif page == "Receitas & Preços": page_receitas_precos()
-    elif page == "Produção": page_producao()
     elif page == "Estoque": page_estoque()
     elif page == "Financeiro": page_financeiro()
 
