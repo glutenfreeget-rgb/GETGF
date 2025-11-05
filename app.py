@@ -1278,3 +1278,20 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+def qexec(sql: str, params=None):
+    with _get_conn() as con:
+        if DRIVER == "pg3":
+            with con.cursor() as cur:
+                if params is None:
+                    cur.execute(sql)
+                else:
+                    cur.execute(sql, params)
+                return cur.rowcount or 0
+        else:
+            with con.cursor() as cur:
+                if params is None:
+                    cur.execute(sql)
+                else:
+                    cur.execute(sql, params)
+                return cur.rowcount or 0
