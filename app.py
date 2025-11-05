@@ -123,141 +123,11 @@ def ensure_ping():
         st.error(f"Erro de conexão: {e}")
         return False
 
-# ===================== MIGRAÇÕES (tabelas base) =====================
+# ===================== MIGRAÇÕES =====================
 def ensure_migrations_core():
+    # schema e índices auxiliares básicos desta entrega
     qexec("create schema if not exists resto;")
-
-    # Unidades, Categorias, Fornecedores
-    qexec("""create table if not exists resto.unit (
-        id bigserial primary key,
-        name text not null,
-        abbr text not null unique,
-        base_hint text
-    );""")
-    qexec("""create table if not exists resto.category (
-        id bigserial primary key,
-        name text not null unique
-    );""")
-    qexec("""create table if not exists resto.supplier (
-        id bigserial primary key,
-        name text not null,
-        cnpj text,
-        ie text,
-        email text,
-        phone text
-    );""")
-
-    # Produtos (com campos fiscais)
-    qexec("""create table if not exists resto.product (
-        id bigserial primary key,
-        code text,
-        name text not null unique,
-        category_id bigint references resto.category(id),
-        unit_id bigint references resto.unit(id),
-        stock_qty numeric(18,6) default 0,
-        avg_cost  numeric(18,6) default 0,
-        last_cost numeric(18,6) default 0,
-        ncm text, cest text, cfop_venda text, csosn text,
-        cst_icms text, aliquota_icms numeric(8,2) default 0,
-        cst_pis text,  aliquota_pis  numeric(8,2) default 0,
-        cst_cofins text, aliquota_cofins numeric(8,2) default 0,
-        iss_aliquota numeric(8,2) default 0,
-        is_sale_item boolean default false,
-        is_ingredient boolean default false,
-        default_markup numeric(10,2) default 0
-    );""")
-
-    # Compras / Lotes
-    qexec("""create table if not exists resto.purchase (
-        id bigserial primary key,
-        supplier_id bigint references resto.supplier(id),
-        doc_number text,
-        cfop_entrada text,
-        doc_date date not null,
-        freight_value numeric(18,6) default 0,
-        other_costs numeric(18,6) default 0,
-        total numeric(18,6) default 0,
-        status text
-    );""")
-    qexec("""create table if not exists resto.purchase_item (
-        id bigserial primary key,
-        purchase_id bigint references resto.purchase(id) on delete cascade,
-        product_id bigint references resto.product(id),
-        qty numeric(18,6) not null,
-        unit_id bigint references resto.unit(id),
-        unit_price numeric(18,6) default 0,
-        discount numeric(18,6) default 0,
-        total numeric(18,6) default 0,
-        lot_number text,
-        expiry_date date
-    );""")
-
-    # Movimentação de estoque
-    qexec("""create table if not exists resto.inventory_movement (
-        id bigserial primary key,
-        move_date timestamptz not null default now(),
-        kind text not null check (kind in ('IN','OUT')),
-        product_id bigint not null references resto.product(id),
-        qty numeric(18,6) not null,
-        unit_cost numeric(18,6) default 0,
-        total_cost numeric(18,6) default 0,
-        reason text,
-        reference_id bigint,
-        note text
-    );""")
-    qexec("create index if not exists invmov_ref_idx on resto.inventory_movement(reference_id);")
-
-    # Vendas
-    qexec("""create table if not exists resto.sale (
-        id bigserial primary key,
-        date date not null,
-        total numeric(18,6) default 0,
-        status text
-    );""")
-    qexec("""create table if not exists resto.sale_item (
-        id bigserial primary key,
-        sale_id bigint references resto.sale(id) on delete cascade,
-        product_id bigint references resto.product(id),
-        qty numeric(18,6) not null,
-        unit_price numeric(18,6) default 0,
-        total numeric(18,6) default 0
-    );""")
-
-    # Receitas (ficha técnica)
-    qexec("""create table if not exists resto.recipe (
-        id bigserial primary key,
-        product_id bigint unique references resto.product(id),
-        yield_qty numeric(18,6) not null,
-        yield_unit_id bigint references resto.unit(id),
-        overhead_pct numeric(10,2) default 0,
-        loss_pct numeric(10,2) default 0
-    );""")
-    qexec("""create table if not exists resto.recipe_item (
-        id bigserial primary key,
-        recipe_id bigint references resto.recipe(id) on delete cascade,
-        ingredient_id bigint references resto.product(id),
-        qty numeric(18,6) not null,
-        unit_id bigint references resto.unit(id),
-        conversion_factor numeric(18,6) default 1
-    );""")
-
-    # Financeiro (categorias + livro caixa)
-    qexec("""create table if not exists resto.cash_category (
-        id bigserial primary key,
-        name text not null unique,
-        kind text not null check (kind in ('IN','OUT'))
-    );""")
-    qexec("""create table if not exists resto.cashbook (
-        id bigserial primary key,
-        entry_date date not null,
-        kind text not null check (kind in ('IN','OUT')),
-        category_id bigint references resto.cash_category(id),
-        description text,
-        amount numeric(18,6) not null,
-        method text
-    );""")
-
-    # Função de movimento de estoque (CMP) se não existir
+    # Função de movimento de estoque (se não existir)
     qexec("""
     do $$
     begin
@@ -322,9 +192,10 @@ def ensure_migrations_core():
     end $$;
     """)
 
-# ===================== MIGRAÇÕES (produção, regras extrato) =====================
 def ensure_migrations_production():
-    qexec("""create table if not exists resto.production (
+    # Produção (ordem de produção) e índice útil
+    qexec("""
+    create table if not exists resto.production (
       id           bigserial primary key,
       date         timestamptz not null default now(),
       product_id   bigint not null references resto.product(id),
@@ -334,8 +205,10 @@ def ensure_migrations_production():
       lot_number   text,
       expiry_date  date,
       note         text
-    );""")
-    qexec("""create table if not exists resto.production_item (
+    );
+    """)
+    qexec("""
+    create table if not exists resto.production_item (
       id              bigserial primary key,
       production_id   bigint not null references resto.production(id) on delete cascade,
       ingredient_id   bigint not null references resto.product(id),
@@ -343,10 +216,14 @@ def ensure_migrations_production():
       qty             numeric(18,6) not null,
       unit_cost       numeric(18,6) not null default 0,
       total_cost      numeric(18,6) not null default 0
-    );""")
+    );
+    """)
+    qexec("""create index if not exists invmov_ref_idx on resto.inventory_movement(reference_id);""")
 
 def ensure_migrations_cash_import():
-    qexec("""create table if not exists resto.cash_rule (
+    # regras p/ classificação do extrato
+    qexec("""
+    create table if not exists resto.cash_rule (
       id              bigserial primary key,
       pattern         text not null,
       category_id     bigint references resto.cash_category(id),
@@ -354,7 +231,8 @@ def ensure_migrations_cash_import():
       method          text,
       priority        integer not null default 0,
       created_at      timestamptz not null default now()
-    );""")
+    );
+    """)
     qexec("""
     insert into resto.cash_category(name, kind) values
       ('Vendas', 'IN'),
@@ -364,19 +242,21 @@ def ensure_migrations_cash_import():
       ('Taxas/Serviços', 'OUT'),
       ('Despesas Fixas', 'OUT'),
       ('Outros Pagamentos', 'OUT')
-    on conflict (name) do nothing;""")
+    on conflict (name) do nothing;
+    """)
     qexec("""
     insert into resto.cash_rule(pattern, category_id, kind, method, priority)
     values
-      ('PAYGO',        (select id from resto.cash_category where name='Vendas'), 'IN',  'cartão crédito', 80),
-      ('PIX RECEBIDO', (select id from resto.cash_category where name='Vendas'), 'IN',  'pix',            60),
-      ('IFOOD',        (select id from resto.cash_category where name='Vendas'), 'IN',  'pix',            50),
-      ('MERCADO PAGO', (select id from resto.cash_category where name='Vendas'), 'IN',  'pix',            45),
+      ('IFOOD',        (select id from resto.cash_category where name='Vendas'), 'IN',  'pix',        50),
+      ('IFD',          (select id from resto.cash_category where name='Vendas'), 'IN',  'pix',        45),
+      ('MERCADO PAGO', (select id from resto.cash_category where name='Vendas'), 'IN',  'pix',        45),
       ('PAGSEGURO',    (select id from resto.cash_category where name='Taxas de Cartão'), 'OUT', 'cartão', 60),
       ('STONE',        (select id from resto.cash_category where name='Taxas de Cartão'), 'OUT', 'cartão', 60),
       ('TAXA',         (select id from resto.cash_category where name='Taxas/Serviços'), 'OUT', 'outro', 40),
-      ('TARIFA',       (select id from resto.cash_category where name='Taxas/Serviços'), 'OUT', 'outro', 40)
-    on conflict do nothing;""")
+      ('TARIFA',       (select id from resto.cash_category where name='Taxas/Serviços'), 'OUT', 'outro', 40),
+      ('PIX',          (select id from resto.cash_category where name='Vendas'), 'IN',  'pix',        10)
+    on conflict do nothing;
+    """)
 
 def ensure_migrations():
     ensure_migrations_core()
@@ -561,7 +441,7 @@ def page_cadastros():
         with st.form("form_prod"):
             code = st.text_input("Código interno")
             name = st.text_input("Nome *")
-            category_id = st.selectbox("Categoria", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in []], index=0) if False else st.selectbox("Categoria", options=[(c['id'], c['name']) for c in cats] if cats else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if cats else None)
+            category_id = st.selectbox("Categoria", options=[(c['id'], c['name']) for c in cats] if cats else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if cats else None)
             unit_id = st.selectbox("Unidade *", options=[(u['id'], u['abbr']) for u in units] if units else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if units else None)
 
             st.markdown("**Campos fiscais (opcional)**")
@@ -659,7 +539,7 @@ def page_compras():
         submit = st.form_submit_button("Lançar compra e atualizar estoque")
     card_end()
 
-    if submit and supplier and doc_date is not None:
+    if submit and supplier and doc_date is not None and df is not None:
         pid = supplier[0]
         row = qone("""
             insert into resto.purchase(supplier_id, doc_number, cfop_entrada, doc_date, freight_value, other_costs, total, status)
@@ -675,6 +555,7 @@ def page_compras():
                 returning id;
             """, (purchase_id, it["product_id"], it["qty"], it["unit_id"], it["unit_price"], it["discount"], it["total"], it["lot_number"], it["expiry_date"]))
             lot_id = rowi["id"]
+            # registra movimento IN por lote
             note = f"lote:{lot_id}" + (f";exp:{it['expiry_date']}" if it["expiry_date"] else "")
             qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'purchase',%s,%s);", (it["product_id"], it["qty"], it["unit_price"], lot_id, note))
 
@@ -686,6 +567,7 @@ def page_vendas():
     prods = safe_qall("select id, name from resto.product where is_sale_item order by name;")
 
     card_start()
+    # Um ÚNICO formulário com dois submits
     with st.form("form_sale", clear_on_submit=False):
         sale_date = st.date_input("Data", value=date.today())
 
@@ -791,6 +673,7 @@ def page_receitas_precos():
                 """, (recipe['id'],))
                 st.dataframe(pd.DataFrame(items), use_container_width=True, hide_index=True)
 
+                # custo estimado (view)
                 cost = safe_qone("select * from resto.v_recipe_cost where product_id=%s;", (prod[0],))
                 if cost:
                     st.markdown(f"**Custo do lote:** {money(cost['batch_cost'])} • **Custo unitário estimado:** {money(cost['unit_cost_estimated'])}")
@@ -860,6 +743,7 @@ def page_producao():
         card_end()
         return
 
+    # Carrega ingredientes da receita
     ingredients = safe_qall("""
         select ri.ingredient_id, p.name as ingrediente, ri.qty, ri.conversion_factor, ri.unit_id
           from resto.recipe_item ri
@@ -987,7 +871,7 @@ def page_financeiro():
 
         with st.form("form_caixa"):
             dt = st.date_input("Data", value=date.today())
-            cat = st.selectbox("Categoria", options=[(c['id'], f\"{c['name']} ({c['kind']})\") for c in cats], format_func=lambda x: x[1])
+            cat = st.selectbox("Categoria", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats] if cats else [], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
             kind = 'IN' if (cat and '(IN)' in cat[1]) else 'OUT'
             desc = st.text_input("Descrição")
             val  = st.number_input("Valor", 0.00, 1_000_000.00, 0.00, 0.01)
@@ -1057,6 +941,7 @@ def _load_csv(file) -> pd.DataFrame:
         txt = raw.decode('latin1', errors='ignore')
     sep = _guess_sep(txt)
     df = pd.read_csv(pd.io.common.StringIO(txt), sep=sep, dtype=str, keep_default_na=False, na_values=[''])
+    # normaliza prováveis colunas de valor
     for c in df.columns:
         if any(k in c.lower() for k in ['valor','amount','credito','crédito','debito','débito']):
             df[c] = (df[c].str.replace('.', '', regex=False)
@@ -1091,8 +976,8 @@ def _load_c6bank_csv_bytes(raw_bytes) -> pd.DataFrame:
     except Exception:
         txt = raw_bytes.decode("latin1", errors="ignore")
     lines = txt.splitlines()
-    header_marker_text = "Data Lançamento,Data Contábil,Título,Descrição,Entrada(R$),Saída(R$),Saldo do Dia(R$)"
-    start = next((i for i, ln in enumerate(lines) if header_marker_text in ln), None)
+    header_marker = "Data Lançamento,Data Contábil,Título,Descrição,Entrada(R$),Saída(R$),Saldo do Dia(R$)"
+    start = next((i for i, ln in enumerate(lines) if header_marker in ln), None)
     if start is None:
         return pd.DataFrame()
     csv_body = "\n".join(lines[start:])
@@ -1118,13 +1003,16 @@ def _load_bank_file(upfile) -> pd.DataFrame:
     except Exception:
         txt = raw.decode("latin1", errors="ignore")
 
+    # C6 Bank: cabeçalho textual + linha de títulos
     if "EXTRATO DE CONTA CORRENTE C6 BANK" in txt or header_marker_text in txt:
         return _load_c6bank_csv_bytes(raw)
 
+    # OFX
     if name.endswith(".ofx"):
         from io import BytesIO
         return _load_ofx(BytesIO(raw))
 
+    # CSV genérico
     from io import BytesIO
     return _load_csv(BytesIO(raw))
 
@@ -1185,6 +1073,7 @@ def page_importar_extrato():
         st.error("Não foi possível reconhecer o layout do arquivo. Tente exportar em CSV padrão (C6) ou use OFX.")
         card_end(); return
 
+    # classificar por regras
     rows = []
     for _, r in out.iterrows():
         clas = _classify_tx(str(r['description']), float(r['amount']))
