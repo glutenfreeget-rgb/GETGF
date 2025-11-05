@@ -106,18 +106,6 @@ def ensure_migrations():
     qexec("""create index if not exists invmov_ref_idx on resto.inventory_movement(reference_id);""")
 
 # ===================== UI Helpers =====================
-
-qexec("""
-create unique index if not exists cashbook_uq_fingerprint_expr
-  on resto.cashbook (
-    entry_date,
-    round(amount::numeric, 2),
-    left(lower(coalesce(description, '')), 50),
-    coalesce(method, '')
-  );
-""")
-
-
 def header(title: str, subtitle: Optional[str] = None):
     st.markdown(
         f"<div class='modern-header'><h2 style='margin:0'>{title}</h2>" +
@@ -210,7 +198,6 @@ def page_dashboard():
         st.markdown("**Valor do Estoque (CMP)**\n\n<h3 class='kpi'>{}</h3>".format(money(stock.get('val',0))), unsafe_allow_html=True)
         st.caption("Quantidade total em estoque: {:.2f}".format(stock.get('qty',0)))
         card_end()
-    st.session_state["_import_extrato_rendering"] = False
 
     with col2:
         card_start()
@@ -579,21 +566,18 @@ def page_producao():
     prod = st.selectbox("Produto final *", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
     if not prod:
         card_end()
-        st.session_state["_import_extrato_rendering"] = False
         return
 
     recipe = qone("select * from resto.recipe where product_id=%s;", (prod[0],))
     if not recipe:
         st.warning("Este produto não possui ficha técnica (receita). Cadastre em 'Receitas & Preços'.")
         card_end()
-        st.session_state["_import_extrato_rendering"] = False
         return
 
     yield_qty = float(recipe["yield_qty"] or 0.0)
     if yield_qty <= 0:
         st.error("Ficha técnica inválida: rendimento deve ser > 0.")
         card_end()
-        st.session_state["_import_extrato_rendering"] = False
         return
 
     with st.form("form_producao"):
@@ -604,7 +588,6 @@ def page_producao():
 
     if not ok or qty_out <= 0:
         card_end()
-        st.session_state["_import_extrato_rendering"] = False
         return
 
     # Carrega ingredientes da receita
@@ -643,7 +626,6 @@ def page_producao():
     if falta:
         st.error("Estoque insuficiente para os ingredientes:\n" + "\n".join([f"- {n}: precisa {q:.3f}, alocado {a:.3f}" for n,q,a in falta]))
         card_end()
-        st.session_state["_import_extrato_rendering"] = False
         return
 
     # Calcula custo do lote final
@@ -748,62 +730,8 @@ def page_financeiro():
             qexec("insert into resto.cashbook(entry_date, kind, category_id, description, amount, method) values (%s,%s,%s,%s,%s,%s);", (dt, kind, cat[0], desc, val, method))
             st.success("Lançamento registrado!")
 
-        df = pd.DataFrame(qall("select id, entry_date, kind, category_id, description, amount, method from resto.cashbook order by entry_date desc, id desc limit 500;"))
+        df = pd.DataFrame(qall("select entry_date, kind, description, amount, method from resto.cashbook order by entry_date desc, id desc limit 500;"))
         st.dataframe(df, use_container_width=True, hide_index=True)
-        # ----- Gerenciar lançamentos (editar / excluir) -----
-        with st.expander("Gerenciar lançamentos (editar / excluir)"):
-            if df is None or df.empty:
-                st.caption("Nenhum lançamento para gerenciar.")
-            else:
-                rows_cb = df.to_dict('records')
-                options = [(int(r['id']), f"#{r['id']} • {r['entry_date']} • {r.get('method') or ''} • {str(r.get('description') or '')[:40]} • {('+' if r['kind']=='IN' else '-')}{r['amount']}") for r in rows_cb]
-                sel = st.selectbox("Selecione um lançamento", options=options, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-                if sel:
-                    sel_id = sel[0]
-                    cur = next((r for r in rows_cb if int(r['id'])==sel_id), None)
-                    if cur:
-                        cats_all = qall("select id, name, kind from resto.cash_category order by name;")
-                        colA, colB, colC = st.columns(3)
-                        with colA:
-                            new_date = st.date_input("Data", value=pd.to_datetime(cur['entry_date']).date())
-                        with colB:
-                            cat_opts = [(c['id'], f"{c['name']} ({c['kind']})") for c in cats_all]
-                            def _fmt(x): return x[1] if isinstance(x, tuple) else x
-                            try:
-                                idx = [c[0] for c in cat_opts].index(cur.get('category_id'))
-                            except Exception:
-                                idx = 0
-                            new_cat = st.selectbox("Categoria", options=cat_opts, index=idx, format_func=_fmt)
-                        with colC:
-                            methods = ['dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro']
-                            curm = cur.get('method') or 'outro'
-                            new_method = st.selectbox("Forma de pagamento", methods, index=(methods.index(curm) if curm in methods else len(methods)-1))
-                        new_desc = st.text_input("Descrição", value=cur.get('description') or '')
-                        new_amount = st.number_input("Valor", -1_000_000.0, 1_000_000.0, float(cur.get('amount') or 0.0), 0.01)
-                        new_kind = 'IN' if '(IN)' in new_cat[1] else 'OUT'
-                        col1b, col2b = st.columns(2)
-                        with col1b:
-                            salvar = st.button("💾 Salvar alterações", type="primary", key=f"save_{sel_id}")
-                        with col2b:
-                            excluir = st.button("🗑️ Excluir lançamento", type="secondary", key=f"del_{sel_id}")
-                        if salvar:
-                            try:
-                                qexec("""
-                                    update resto.cashbook
-                                       set entry_date=%s, kind=%s, category_id=%s, description=%s, amount=%s, method=%s
-                                     where id=%s;
-                                """, (new_date, new_kind, int(new_cat[0]), new_desc[:300], float(new_amount), new_method, sel_id))
-                                st.success("Lançamento atualizado.")
-                                st.experimental_rerun()
-                            except Exception as e:
-                                st.error(f"Erro ao atualizar: {e}")
-                        if excluir:
-                            try:
-                                qexec("delete from resto.cashbook where id=%s;", (sel_id,))
-                                st.success("Lançamento excluído.")
-                                st.experimental_rerun()
-                            except Exception as e:
-                                st.error(f"Erro ao excluir: {e}")
         card_end()
 
     with tabs[1]:
@@ -947,29 +875,92 @@ def _find_duplicates(df: pd.DataFrame) -> pd.Series:
     )
     return df2["key"].isin(set(base["key"]))
 
-
-
-
-
 def page_importar_extrato():
     header("🏦 Importar Extrato (CSV)", "Modelo C6 ou CSV genérico com data/descrição/valor.")
     card_start()
-    st.session_state.setdefault("import_lock", False)
-    if st.session_state["import_lock"]:
-        st.warning("Importação em andamento... aguarde finalizar.")
+    st.subheader("1) Selecione o arquivo")
+    up = st.file_uploader("CSV do banco", type=["csv"])
+    if not up:
+        st.info("Dica: o CSV do C6 com cabeçalho 'Data Lançamento, Data Contábil, ...' é detectado automaticamente.")
         card_end()
-        st.session_state["_import_extrato_rendering"] = False
         return
 
-    # --- Render guard: evita criar dois file_uploaders no mesmo run ---
-    if st.session_state.get("_import_extrato_rendering", False):
-        st.info("Carregador já renderizado neste ciclo.")
+    df = _load_bank_file(up)
+    if df.empty or not set(df.columns) >= {"entry_date","description","amount"}:
+        st.error("Não consegui reconhecer o layout (preciso de: data, descrição, valor).")
         card_end()
-        st.session_state["_import_extrato_rendering"] = False
         return
-    st.session_state["_import_extrato_rendering"] = True
-    
-    # --- Uploader sem key de usuário; usa rótulo salgado para ser único e permitir 'limpar' ---
-    st.session_state.setdefault("import_extrato_salt", 1)
-    uploader_label = f"CSV do banco — sessão {st.session_state['import_extrato_salt']}"
-    up = st.file_uploader(uploader_label, type=["csv"])
+
+    st.success(f"Arquivo reconhecido. {len(df)} linhas.")
+    st.dataframe(df.head(100), use_container_width=True, hide_index=True)
+
+    st.subheader("2) Ajustes e classificação")
+    cats = qall("select id, name, kind from resto.cash_category order by name;")
+    if not cats:
+        st.warning("Nenhuma categoria encontrada. Crie categorias em **Financeiro → Livro caixa** antes de importar.")
+        card_end()
+        return
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        default_cat_in = st.selectbox("Categoria padrão para ENTRADAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='IN'],
+                                      format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    with col2:
+        default_cat_out = st.selectbox("Categoria padrão para SAÍDAS", options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='OUT'],
+                                       format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    with col3:
+        method = st.selectbox("Método (aplicar em todos)", ['dinheiro','pix','cartão débito','cartão crédito','boleto','outro'])
+
+    # Define coluna kind e category_id por sinal do valor
+    out = df.copy()
+    out["kind"] = out["amount"].apply(lambda v: "IN" if float(v) >= 0 else "OUT")
+    out["category_id"] = out["kind"].apply(lambda k: default_cat_in[0] if k=="IN" else default_cat_out[0])
+
+    # Duplicados (últimos 12 meses)
+    out["duplicado?"] = _find_duplicates(out)
+
+    st.subheader("3) Conferência")
+    st.dataframe(out.head(100), use_container_width=True, hide_index=True)
+    st.info(f"Detectados **{int(out['duplicado?'].sum())}** possíveis duplicados (mesma data, valor e início da descrição). Eles não serão importados.")
+
+    st.subheader("4) Importar")
+    prontos = out[~out["duplicado?"]].copy()
+    st.markdown(f"Prontos para importar: **{len(prontos)}**")
+
+    with st.form("form_import"):
+        confirma = st.checkbox("Confirmo que revisei os dados e desejo importar os lançamentos.")
+        go = st.form_submit_button(f"🚀 Importar {len(prontos)} lançamentos")
+
+    if go and confirma:
+        ok = 0
+        for _, r in prontos.iterrows():
+            qexec("""
+                insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
+                values (%s, %s, %s, %s, %s, %s);
+            """, (str(r["entry_date"]), r["kind"], int(r["category_id"]), str(r["description"])[:300], float(r["amount"]), method))
+            ok += 1
+        st.success(f"Importados {ok} lançamentos no livro-caixa!")
+    card_end()
+
+
+# ===================== Router =====================
+def main():
+    if not ensure_ping():
+        st.stop()
+    ensure_migrations()
+
+    header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")
+    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro", "Importar Extrato"], index=0)
+
+    if page == "Painel": page_dashboard()
+    elif page == "Cadastros": page_cadastros()
+    elif page == "Compras": page_compras()
+    elif page == "Vendas": page_vendas()
+    elif page == "Receitas & Preços": page_receitas_precos()
+    elif page == "Produção": page_producao()
+    elif page == "Estoque": page_estoque()
+    elif page == "Financeiro": page_financeiro()
+    elif page == "Importar Extrato": page_importar_extrato()
+
+if __name__ == "__main__":
+    main()
