@@ -405,42 +405,74 @@ def page_compras():
         st.session_state["compra_itens"] = []
         st.success(f"Compra #{purchase_id} lançada e estoque atualizado!")
 
+
 def page_vendas():
     header("🧾 Vendas (simples)", "Registre saídas e gere CMV.")
     prods = qall("select id, name from resto.product where is_sale_item order by name;")
 
     card_start()
-    with st.form("form_sale"):
+    # Um ÚNICO formulário com DOIS botões de submit:
+    #  - "Adicionar item" (atualiza a lista)
+    #  - "Fechar venda..." (grava a venda e baixa estoque)
+    with st.form("form_sale", clear_on_submit=False):
         sale_date = st.date_input("Data", value=date.today())
+
         if "sale_itens" not in st.session_state:
             st.session_state["sale_itens"] = []
 
-        with st.expander("Adicionar item"):
-            prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-            qty = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1)
-            price = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01)
-            add = st.button("Adicionar")
-            if add and prod and qty>0:
-                st.session_state["sale_itens"].append({"product_id": prod[0], "product_name": prod[1], "qty": qty, "unit_price": price, "total": qty*price})
+        with st.expander("Adicionar item", expanded=True):
+            prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods],
+                                format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="sale_prod")
+            qty = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1, key="sale_qty")
+            price = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01, key="sale_price")
+
+            # >>> IMPORTANTE: dentro do form use st.form_submit_button (NÃO st.button)
+            add = st.form_submit_button("➕ Adicionar item", type="secondary")
+            if add and prod and qty > 0:
+                st.session_state["sale_itens"].append({
+                    "product_id": prod[0],
+                    "product_name": prod[1],
+                    "qty": float(qty),
+                    "unit_price": float(price),
+                    "total": float(qty) * float(price),
+                })
                 st.success("Item adicionado!")
 
-        df = pd.DataFrame(st.session_state["sale_itens"]) if st.session_state["sale_itens"] else pd.DataFrame(columns=["product_name","qty","unit_price","total"])
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        total = float(df["total"].sum()) if not df.empty else 0.0
-        st.markdown(f"**Total da venda:** {money(total)}")
+        # Mostra carrinho atual (a partir do session_state)
+        df_tmp = (pd.DataFrame(st.session_state["sale_itens"])
+                  if st.session_state["sale_itens"] else
+                  pd.DataFrame(columns=["product_name","qty","unit_price","total"]))
+        st.dataframe(df_tmp, use_container_width=True, hide_index=True)
+        total_tmp = float(df_tmp["total"].sum()) if not df_tmp.empty else 0.0
+        st.markdown(f"**Total da venda (parcial):** {money(total_tmp)}")
 
-        submit = st.form_submit_button("Fechar venda e dar baixa no estoque")
+        # Botão principal do mesmo form
+        submit = st.form_submit_button("✅ Fechar venda e dar baixa no estoque")
+
     card_end()
 
-    if submit and sale_date and df is not None:
-        row = qone("insert into resto.sale(date, total, status) values (%s,%s,'FECHADA') returning id;", (sale_date, total))
+    # Fora do form: ao clicar "Fechar venda", grava tudo
+    if submit:
+        df = pd.DataFrame(st.session_state["sale_itens"])
+        if df.empty:
+            st.warning("Nenhum item no carrinho.")
+            return
+        total = float(df["total"].sum())
+
+        row = qone("insert into resto.sale(date, total, status) values (%s,%s,'FECHADA') returning id;",
+                   (sale_date, total))
         sale_id = row["id"]
+
         for it in st.session_state["sale_itens"]:
-            qexec("insert into resto.sale_item(sale_id, product_id, qty, unit_price, total) values (%s,%s,%s,%s,%s);", (sale_id, it["product_id"], it["qty"], it["unit_price"], it["total"]))
-            # Saída usa CMP atual (sp cuidará), sem amarrar lote neste MVP de venda
-            qexec("select resto.sp_register_movement(%s,'OUT',%s,null,'sale',%s,%s);", (it["product_id"], it["qty"], sale_id, ''))
-        st.session_state["sale_itens"] = []
+            qexec("insert into resto.sale_item(sale_id, product_id, qty, unit_price, total) values (%s,%s,%s,%s,%s);",
+                  (sale_id, it["product_id"], it["qty"], it["unit_price"], it["total"]))
+            # Saída usa CMP atual (sp cuidará); sem amarrar lote neste MVP de venda
+            qexec("select resto.sp_register_movement(%s,'OUT',%s,null,'sale',%s,%s);",
+                  (it["product_id"], it["qty"], sale_id, ''))
+
+        st.session_state["sale_itens"] = []  # limpa carrinho
         st.success(f"Venda #{sale_id} fechada e estoque baixado!")
+
 
 def page_receitas_precos():
     header("🥣 Fichas Técnicas & Precificação", "Monte receitas e calcule preço sugerido.")
