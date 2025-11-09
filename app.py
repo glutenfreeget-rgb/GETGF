@@ -1034,8 +1034,32 @@ def page_estoque():
           alter table resto.product  add column if not exists active      boolean default true;
 
           create index if not exists product_name_idx  on resto.product (lower(name));
+
+          -- Tenta relaxar NOT NULL se existir (ignora erros)
+          begin
+            alter table resto.product alter column supplier_id drop not null;
+          exception when others then
+            null;
+          end;
+          begin
+            alter table resto.product alter column category drop not null;
+          exception when others then
+            null;
+          end;
         end $$;
         """)
+
+    # --- fornecedor padrão para evitar NOT NULL
+    def _default_supplier_id():
+        row = qone("select id from resto.supplier where lower(name)=lower(%s);", ("Fornecedor Padrão",))
+        if row:
+            return row["id"]
+        row = qone("""
+            insert into resto.supplier(name, active)
+            values (%s, true)
+            returning id;
+        """, ("Fornecedor Padrão",))
+        return row["id"]
 
     # garante esquema antes de qualquer consulta
     _ensure_inventory_schema()
@@ -1225,11 +1249,20 @@ def page_estoque():
             if not pr_name.strip():
                 st.warning("Informe o nome do insumo.")
             else:
+                # se não escolher fornecedor, usa fornecedor padrão
+                if isinstance(pr_sup, tuple):
+                    supplier_id_to_use = pr_sup[0] if pr_sup[0] is not None else _default_supplier_id()
+                else:
+                    supplier_id_to_use = _default_supplier_id()
+
+                # categoria padrão "Geral" se vier vazia
+                cat_to_use = (pr_cat or "Geral").strip()
+
                 qexec("""
                     insert into resto.product (name, unit, category, supplier_id, barcode, min_stock, last_cost, active)
                     values (%s, %s, %s, %s, %s, %s, %s, %s);
-                """, (pr_name.strip(), pr_unit, pr_cat or None,
-                      (pr_sup[0] if isinstance(pr_sup, tuple) else None),
+                """, (pr_name.strip(), pr_unit, cat_to_use,
+                      int(supplier_id_to_use),
                       pr_bar or None, float(pr_min), float(pr_cost), pr_active))
                 st.success("Insumo cadastrado.")
                 _rerun()
@@ -1348,6 +1381,7 @@ def page_estoque():
             st.caption("Nenhum insumo encontrado para os filtros.")
 
         card_end()
+
 
 
 
