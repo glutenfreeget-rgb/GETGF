@@ -741,6 +741,13 @@ def page_estoque():
 
 # ===================== FINANCEIRO =====================
 def page_financeiro():
+    # helper p/ recarregar sem depender do nome antigo
+    def _rerun():
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
+
     header("💰 Financeiro", "Entradas, Saídas e DRE.")
     tabs = st.tabs(["💸 Entradas", "💳 Saídas", "📈 DRE", "⚙️ Gestão", "📊 Painel", "📆 Comparativo"])
 
@@ -949,85 +956,85 @@ def page_financeiro():
         df_g = pd.DataFrame(rows_g)
 
         st.subheader("Grid editável")
-        if df_g.empty:
+        if not df_g.empty:
+            id_to_label = {c["id"]: f"{c['name']} ({c['kind']})" for c in cats_all}
+            label_to_id = {v: k for k, v in id_to_label.items()}
+
+            df_g["categoria"] = df_g["category_id"].map(id_to_label).fillna("")
+            df_g["Excluir?"] = False
+
+            colcfg = {
+                "id": st.column_config.NumberColumn("ID", disabled=True),
+                "entry_date": st.column_config.DateColumn("Data"),
+                "kind": st.column_config.SelectboxColumn("Tipo", options=["IN", "OUT"]),
+                "categoria": st.column_config.SelectboxColumn("Categoria", options=list(label_to_id.keys())),
+                "method": st.column_config.SelectboxColumn("Método", options=METHODS[1:]),
+                "description": st.column_config.TextColumn("Descrição"),
+                "amount": st.column_config.NumberColumn("Valor", step=0.01, format="%.2f"),
+                "Excluir?": st.column_config.CheckboxColumn("Excluir?", help="Marque para excluir este lançamento"),
+            }
+
+            edited = st.data_editor(
+                df_g[["id","entry_date","kind","categoria","method","description","amount","Excluir?"]],
+                column_config=colcfg,
+                num_rows="fixed",
+                hide_index=True,
+                key="gest_editor",
+                use_container_width=True
+            )
+
+            colb1, colb2 = st.columns(2)
+            with colb1:
+                aplicar = st.button("💾 Aplicar alterações", key="gest_apply")
+            with colb2:
+                refresh = st.button("🔄 Atualizar", key="gest_refresh")
+
+            if refresh:
+                _rerun()
+
+            if aplicar:
+                orig = df_g.set_index("id")
+                new = edited.set_index("id")
+
+                upd, del_ids, err = 0, 0, 0
+
+                # exclusões
+                to_delete = new.index[new["Excluir?"] == True].tolist()
+                for _id in to_delete:
+                    try:
+                        qexec("delete from resto.cashbook where id=%s;", (_id,))
+                        del_ids += 1
+                    except Exception:
+                        err += 1
+
+                # updates (somente linhas não marcadas para excluir)
+                keep_ids = [i for i in new.index if i not in to_delete]
+                for _id in keep_ids:
+                    a = orig.loc[_id]; b = new.loc[_id]
+
+                    changed = any(str(a.get(f, "")) != str(b.get(f, "")) for f in
+                                  ["entry_date","kind","categoria","method","description","amount"])
+                    if not changed:
+                        continue
+
+                    new_cat_id = label_to_id.get(b["categoria"]) or int(a["category_id"])
+                    new_kind = b["kind"] if b["kind"] in ("IN","OUT") else a["kind"]
+
+                    try:
+                        qexec("""
+                            update resto.cashbook
+                               set entry_date=%s, kind=%s, category_id=%s, description=%s, amount=%s, method=%s
+                             where id=%s;
+                        """, (b["entry_date"], new_kind, int(new_cat_id),
+                              (b["description"] or "")[:300], float(b["amount"]), b["method"], int(_id)))
+                        upd += 1
+                    except Exception:
+                        err += 1
+
+                st.success(f"✅ {upd} atualizado(s) • 🗑️ {del_ids} excluído(s) • ⚠️ {err} com erro.")
+                _rerun()
+        else:
             st.caption("Sem lançamentos para os filtros.")
-            card_end()
-            return
-
-        id_to_label = {c["id"]: f"{c['name']} ({c['kind']})" for c in cats_all}
-        label_to_id = {v: k for k, v in id_to_label.items()}
-
-        df_g["categoria"] = df_g["category_id"].map(id_to_label).fillna("")
-        df_g["Excluir?"] = False
-
-        colcfg = {
-            "id": st.column_config.NumberColumn("ID", disabled=True),
-            "entry_date": st.column_config.DateColumn("Data"),
-            "kind": st.column_config.SelectboxColumn("Tipo", options=["IN", "OUT"]),
-            "categoria": st.column_config.SelectboxColumn("Categoria", options=list(label_to_id.keys())),
-            "method": st.column_config.SelectboxColumn("Método", options=METHODS[1:]),
-            "description": st.column_config.TextColumn("Descrição"),
-            "amount": st.column_config.NumberColumn("Valor", step=0.01, format="%.2f"),
-            "Excluir?": st.column_config.CheckboxColumn("Excluir?", help="Marque para excluir este lançamento"),
-        }
-
-        edited = st.data_editor(
-            df_g[["id","entry_date","kind","categoria","method","description","amount","Excluir?"]],
-            column_config=colcfg,
-            num_rows="fixed",
-            hide_index=True,
-            key="gest_editor",
-            use_container_width=True
-        )
-
-        colb1, colb2 = st.columns(2)
-        with colb1:
-            aplicar = st.button("💾 Aplicar alterações", key="gest_apply")
-        with colb2:
-            refresh = st.button("🔄 Atualizar", key="gest_refresh")
-
-        if refresh:
-            _rerun()
-
-        if aplicar:
-            orig = df_g.set_index("id")
-            new = edited.set_index("id")
-
-            upd, del_ids, err = 0, 0, 0
-
-            to_delete = new.index[new["Excluir?"] == True].tolist()
-            for _id in to_delete:
-                try:
-                    qexec("delete from resto.cashbook where id=%s;", (_id,))
-                    del_ids += 1
-                except Exception:
-                    err += 1
-
-            keep_ids = [i for i in new.index if i not in to_delete]
-            for _id in keep_ids:
-                a = orig.loc[_id]; b = new.loc[_id]
-
-                changed = any(str(a.get(f, "")) != str(b.get(f, "")) for f in
-                              ["entry_date","kind","categoria","method","description","amount"])
-                if not changed:
-                    continue
-
-                new_cat_id = label_to_id.get(b["categoria"]) or int(a["category_id"])
-                new_kind = b["kind"] if b["kind"] in ("IN","OUT") else a["kind"]
-
-                try:
-                    qexec("""
-                        update resto.cashbook
-                           set entry_date=%s, kind=%s, category_id=%s, description=%s, amount=%s, method=%s
-                         where id=%s;
-                    """, (b["entry_date"], new_kind, int(new_cat_id),
-                          (b["description"] or "")[:300], float(b["amount"]), b["method"], int(_id)))
-                    upd += 1
-                except Exception:
-                    err += 1
-
-            st.success(f"✅ {upd} atualizado(s) • 🗑️ {del_ids} excluído(s) • ⚠️ {err} com erro.")
-            _rerun()
 
         card_end()
 
@@ -1036,7 +1043,6 @@ def page_financeiro():
         card_start()
         st.subheader("📊 Painel por Categoria")
 
-        # Filtros (data + categorias múltiplas)
         colp1, colp2 = st.columns(2)
         with colp1:
             p_dtini = st.date_input("De", value=date.today().replace(day=1), key="painel_dtini")
@@ -1053,7 +1059,6 @@ def page_financeiro():
         )
         sel_ids = [c[0] for c in p_cats] if p_cats else []
 
-        # Query agregada por categoria
         wh = ["cb.entry_date >= %s", "cb.entry_date <= %s"]
         pr = [p_dtini, p_dtfim]
         if sel_ids:
@@ -1074,187 +1079,167 @@ def page_financeiro():
         rows_p = qall(sqlp, tuple(pr))
         dfp = pd.DataFrame(rows_p or [])
 
-        if dfp.empty:
+        if not dfp.empty:
+            dfp["entradas"] = dfp["entradas_raw"].astype(float)
+            dfp["saidas"]   = dfp["saidas_raw"].astype(float).apply(lambda x: -x if x < 0 else x)
+            dfp["saldo"]    = dfp["entradas"] - dfp["saidas"]
+
+            k1, k2, k3 = st.columns(3)
+            with k1: st.metric("Entradas (período)",  money(float(dfp["entradas"].sum())))
+            with k2: st.metric("Saídas (período)",    money(float(dfp["saidas"].sum())))
+            with k3: st.metric("Resultado (E − S)",   money(float(dfp["saldo"].sum())))
+
+            st.markdown("#### Por categoria")
+            df_show = dfp[["categoria","entradas","saidas","saldo"]].sort_values("saldo", ascending=False)
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+            chart_df = df_show.set_index("categoria")[["entradas","saidas"]]
+            st.bar_chart(chart_df, use_container_width=True)
+
+            csv = df_show.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Exportar CSV (Painel)", data=csv, file_name="painel_financeiro.csv", mime="text/csv")
+        else:
             st.caption("Sem lançamentos no período/filtro.")
-            card_end()
-            return
-
-        # Normaliza: Saídas em valor positivo para visualização
-        dfp["entradas"] = dfp["entradas_raw"].astype(float)
-        dfp["saidas"]   = dfp["saidas_raw"].astype(float).apply(lambda x: -x if x < 0 else x)
-        dfp["saldo"]    = dfp["entradas"] - dfp["saidas"]
-
-        # KPIs
-        k1, k2, k3 = st.columns(3)
-        with k1: st.metric("Entradas (período)",  money(float(dfp["entradas"].sum())))
-        with k2: st.metric("Saídas (período)",    money(float(dfp["saidas"].sum())))
-        with k3: st.metric("Resultado (E − S)",   money(float(dfp["saldo"].sum())))
-
-        st.markdown("#### Por categoria")
-        df_show = dfp[["categoria","entradas","saidas","saldo"]].sort_values("saldo", ascending=False)
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
-
-        # Gráfico de barras
-        chart_df = df_show.set_index("categoria")[["entradas","saidas"]]
-        st.bar_chart(chart_df, use_container_width=True)
-
-        # (opcional) Exportar CSV do painel
-        csv = df_show.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Exportar CSV (Painel)", data=csv, file_name="painel_financeiro.csv", mime="text/csv")
 
         card_end()
-        
-# ---------- Aba: 📆 Comparativo ----------
-with tabs[5]:
-    card_start()
-    st.subheader("📆 Comparativo (Mensal / Semestral / Anual)")
 
-    METHODS = ['— todas —', 'dinheiro', 'pix', 'cartão débito', 'cartão crédito', 'boleto', 'transferência', 'outro']
+    # ---------- Aba: 📆 Comparativo ----------
+    with tabs[5]:
+        card_start()
+        st.subheader("📆 Comparativo (Mensal / Semestral / Anual)")
 
-    colc1, colc2, colc3 = st.columns([1, 1, 2])
-    with colc1:
-        modo = st.selectbox(
-            "Período",
-            ["Mensal (12m)", "Semestral (6m)", "Anual (5a)"],
-            key="cmp_modo"
-        )
-    with colc2:
-        method = st.selectbox("Método", METHODS, key="cmp_method")
-    with colc3:
-        cats_all = qall("select id, name from resto.cash_category order by name;") or []
-        cat_opts = [(c["id"], c["name"]) for c in cats_all]
-        cmp_cats = st.multiselect(
-            "Categorias (opcional)",
-            options=cat_opts,
-            format_func=lambda x: x[1],
-            key="cmp_cats"
-        )
-        cat_ids = [c[0] for c in cmp_cats] if cmp_cats else []
+        colc1, colc2, colc3 = st.columns([1, 1, 2])
+        with colc1:
+            modo = st.selectbox("Período", ["Mensal (12m)", "Semestral (6m)", "Anual (5a)"], key="cmp_modo")
+        with colc2:
+            method = st.selectbox("Método", METHODS, key="cmp_method")
+        with colc3:
+            cats_all = qall("select id, name from resto.cash_category order by name;") or []
+            cat_opts = [(c["id"], c["name"]) for c in cats_all]
+            cmp_cats = st.multiselect("Categorias (opcional)", options=cat_opts, format_func=lambda x: x[1], key="cmp_cats")
+            cat_ids = [c[0] for c in cmp_cats] if cmp_cats else []
 
-    if modo in ("Mensal (12m)", "Semestral (6m)"):
-        nmeses = 12 if "12" in modo else 6
+        if modo in ("Mensal (12m)", "Semestral (6m)"):
+            nmeses = 12 if "12" in modo else 6
 
-        wh_extra = []
-        params = []
-        if cat_ids:
-            wh_extra.append("cb.category_id = ANY(%s)")
-            params.append(cat_ids)
-        if method and method != '— todas —':
-            wh_extra.append("cb.method = %s")
-            params.append(method)
+            wh_extra = []
+            params = []
+            if cat_ids:
+                wh_extra.append("cb.category_id = ANY(%s)")
+                params.append(cat_ids)
+            if method and method != '— todas —':
+                wh_extra.append("cb.method = %s")
+                params.append(method)
 
-        sql_cmp = f"""
-            with series as (
-                select generate_series(
-                    date_trunc('month', current_date) - interval '{nmeses-1} months',
-                    date_trunc('month', current_date),
-                    interval '1 month'
-                )::date as m
-            ),
-            agg as (
-                select date_trunc('month', cb.entry_date)::date as m,
-                       sum(case when cb.kind='IN'  then cb.amount else 0 end)  as vin,
-                       sum(case when cb.kind='OUT' then cb.amount else 0 end)  as vout
-                  from resto.cashbook cb
-                 where cb.entry_date >= (select min(m) from series)
-                   and cb.entry_date <  (date_trunc('month', current_date) + interval '1 month')
-                   {(' and ' + ' and '.join(wh_extra)) if wh_extra else ''}
-              group by 1
-            )
-            select to_char(s.m, 'YYYY-MM') as periodo,
-                   coalesce(a.vin,0)  as entradas_raw,
-                   coalesce(a.vout,0) as saidas_raw
-              from series s
-              left join agg a on a.m = s.m
-          order by s.m;
-        """
-        rows_cmp = qall(sql_cmp, tuple(params)) or []
-        dfc = pd.DataFrame(rows_cmp)
-        if dfc.empty:
-            st.caption("Sem lançamentos no período/critério selecionado.")
-            card_end()
-            return
+            sql_cmp = f"""
+                with series as (
+                    select generate_series(
+                        date_trunc('month', current_date) - interval '{nmeses-1} months',
+                        date_trunc('month', current_date),
+                        interval '1 month'
+                    )::date as m
+                ),
+                agg as (
+                    select date_trunc('month', cb.entry_date)::date as m,
+                           sum(case when cb.kind='IN'  then cb.amount else 0 end)  as vin,
+                           sum(case when cb.kind='OUT' then cb.amount else 0 end)  as vout
+                      from resto.cashbook cb
+                     where cb.entry_date >= (select min(m) from series)
+                       and cb.entry_date <  (date_trunc('month', current_date) + interval '1 month')
+                       {(' and ' + ' and '.join(wh_extra)) if wh_extra else ''}
+                  group by 1
+                )
+                select to_char(s.m, 'YYYY-MM') as periodo,
+                       coalesce(a.vin,0)  as entradas_raw,
+                       coalesce(a.vout,0) as saidas_raw
+                  from series s
+                  left join agg a on a.m = s.m
+              order by s.m;
+            """
+            rows_cmp = qall(sql_cmp, tuple(params)) or []
+            dfc = pd.DataFrame(rows_cmp)
 
-        dfc["entradas"] = dfc["entradas_raw"].astype(float)
-        dfc["saidas"]   = dfc["saidas_raw"].astype(float).apply(lambda x: -x if x < 0 else x)
-        dfc["saldo"]    = dfc["entradas"] - dfc["saidas"]
+            if not dfc.empty:
+                dfc["entradas"] = dfc["entradas_raw"].astype(float)
+                dfc["saidas"]   = dfc["saidas_raw"].astype(float).apply(lambda x: -x if x < 0 else x)
+                dfc["saldo"]    = dfc["entradas"] - dfc["saidas"]
 
-        k1, k2, k3 = st.columns(3)
-        with k1: st.metric("Entradas", money(float(dfc["entradas"].sum())))
-        with k2: st.metric("Saídas",   money(float(dfc["saidas"].sum())))
-        with k3: st.metric("Saldo",    money(float(dfc["saldo"].sum())))
+                k1, k2, k3 = st.columns(3)
+                with k1: st.metric("Entradas", money(float(dfc["entradas"].sum())))
+                with k2: st.metric("Saídas",   money(float(dfc["saidas"].sum())))
+                with k3: st.metric("Saldo",    money(float(dfc["saldo"].sum())))
 
-        st.markdown("#### Evolução mensal")
-        show = dfc[["periodo","entradas","saidas","saldo"]]
-        st.dataframe(show, use_container_width=True, hide_index=True)
-        st.bar_chart(show.set_index("periodo")[["entradas","saidas"]], use_container_width=True)
+                st.markdown("#### Evolução mensal")
+                show = dfc[["periodo","entradas","saidas","saldo"]]
+                st.dataframe(show, use_container_width=True, hide_index=True)
+                st.bar_chart(show.set_index("periodo")[["entradas","saidas"]], use_container_width=True)
 
-        csv = show.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Exportar CSV (Comparativo Mensal/Semestral)", data=csv,
-                           file_name="comparativo_mensal.csv", mime="text/csv")
+                csv = show.to_csv(index=False).encode("utf-8")
+                st.download_button("⬇️ Exportar CSV (Comparativo Mensal/Semestral)", data=csv,
+                                   file_name="comparativo_mensal.csv", mime="text/csv")
+            else:
+                st.caption("Sem lançamentos no período/critério selecionado.")
 
-    else:
-        wh_extra = []
-        params = []
-        if cat_ids:
-            wh_extra.append("cb.category_id = ANY(%s)")
-            params.append(cat_ids)
-        if method and method != '— todas —':
-            wh_extra.append("cb.method = %s")
-            params.append(method)
+        else:
+            wh_extra = []
+            params = []
+            if cat_ids:
+                wh_extra.append("cb.category_id = ANY(%s)")
+                params.append(cat_ids)
+            if method and method != '— todas —':
+                wh_extra.append("cb.method = %s")
+                params.append(method)
 
-        sql_cmp_y = f"""
-            with series as (
-                select generate_series(
-                    date_trunc('year', current_date) - interval '4 years',
-                    date_trunc('year', current_date),
-                    interval '1 year'
-                )::date as y
-            ),
-            agg as (
-                select date_trunc('year', cb.entry_date)::date as y,
-                       sum(case when cb.kind='IN'  then cb.amount else 0 end)  as vin,
-                       sum(case when cb.kind='OUT' then cb.amount else 0 end)  as vout
-                  from resto.cashbook cb
-                 where cb.entry_date >= (date_trunc('year', current_date) - interval '4 years')
-                   and cb.entry_date <  (date_trunc('year', current_date) + interval '1 year')
-                   {(' and ' + ' and '.join(wh_extra)) if wh_extra else ''}
-              group by 1
-            )
-            select to_char(s.y, 'YYYY') as ano,
-                   coalesce(a.vin,0)  as entradas_raw,
-                   coalesce(a.vout,0) as saidas_raw
-              from series s
-              left join agg a on a.y = s.y
-          order by s.y;
-        """
-        rows_cmp_y = qall(sql_cmp_y, tuple(params)) or []
-        dfy = pd.DataFrame(rows_cmp_y)
-        if dfy.empty:
-            st.caption("Sem lançamentos no período/critério selecionado.")
-            card_end()
-            return
+            sql_cmp_y = f"""
+                with series as (
+                    select generate_series(
+                        date_trunc('year', current_date) - interval '4 years',
+                        date_trunc('year', current_date),
+                        interval '1 year'
+                    )::date as y
+                ),
+                agg as (
+                    select date_trunc('year', cb.entry_date)::date as y,
+                           sum(case when cb.kind='IN'  then cb.amount else 0 end)  as vin,
+                           sum(case when cb.kind='OUT' then cb.amount else 0 end)  as vout
+                      from resto.cashbook cb
+                     where cb.entry_date >= (date_trunc('year', current_date) - interval '4 years')
+                       and cb.entry_date <  (date_trunc('year', current_date) + interval '1 year')
+                       {(' and ' + ' and '.join(wh_extra)) if wh_extra else ''}
+                  group by 1
+                )
+                select to_char(s.y, 'YYYY') as ano,
+                       coalesce(a.vin,0)  as entradas_raw,
+                       coalesce(a.vout,0) as saidas_raw
+                  from series s
+                  left join agg a on a.y = s.y
+              order by s.y;
+            """
+            rows_cmp_y = qall(sql_cmp_y, tuple(params)) or []
+            dfy = pd.DataFrame(rows_cmp_y)
 
-        dfy["entradas"] = dfy["entradas_raw"].astype(float)
-        dfy["saidas"]   = dfy["saidas_raw"].astype(float).apply(lambda x: -x if x < 0 else x)
-        dfy["saldo"]    = dfy["entradas"] - dfy["saidas"]
+            if not dfy.empty:
+                dfy["entradas"] = dfy["entradas_raw"].astype(float)
+                dfy["saidas"]   = dfy["saidas_raw"].astype(float).apply(lambda x: -x if x < 0 else x)
+                dfy["saldo"]    = dfy["entradas"] - dfy["saidas"]
 
-        k1, k2, k3 = st.columns(3)
-        with k1: st.metric("Entradas (5a)", money(float(dfy["entradas"].sum())))
-        with k2: st.metric("Saídas (5a)",   money(float(dfy["saidas"].sum())))
-        with k3: st.metric("Saldo (5a)",    money(float(dfy["saldo"].sum())))
+                k1, k2, k3 = st.columns(3)
+                with k1: st.metric("Entradas (5a)", money(float(dfy["entradas"].sum())))
+                with k2: st.metric("Saídas (5a)",   money(float(dfy["saidas"].sum())))
+                with k3: st.metric("Saldo (5a)",    money(float(dfy["saldo"].sum())))
 
-        st.markdown("#### Evolução anual (últimos 5 anos)")
-        show_y = dfy[["ano","entradas","saidas","saldo"]]
-        st.dataframe(show_y, use_container_width=True, hide_index=True)
-        st.bar_chart(show_y.set_index("ano")[["entradas","saidas"]], use_container_width=True)
+                st.markdown("#### Evolução anual (últimos 5 anos)")
+                show_y = dfy[["ano","entradas","saidas","saldo"]]
+                st.dataframe(show_y, use_container_width=True, hide_index=True)
+                st.bar_chart(show_y.set_index("ano")[["entradas","saidas"]], use_container_width=True)
 
-        csv = show_y.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Exportar CSV (Comparativo Anual)", data=csv,
-                           file_name="comparativo_anual.csv", mime="text/csv")
+                csv = show_y.to_csv(index=False).encode("utf-8")
+                st.download_button("⬇️ Exportar CSV (Comparativo Anual)", data=csv,
+                                   file_name="comparativo_anual.csv", mime="text/csv")
+            else:
+                st.caption("Sem lançamentos no período/critério selecionado.")
 
-    card_end()
-
+        card_end()
 
 
 # ===================== Importar Extrato (CSV C6 / genérico) =====================
