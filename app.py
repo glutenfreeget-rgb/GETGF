@@ -602,35 +602,52 @@ def page_producao():
                 st.experimental_rerun()
 
     def _ensure_production_schema():
-        # Garante tabelas necessárias sem quebrar o que já existe
+        # Garante tabelas/colunas necessárias sem quebrar o que já existe
         qexec("""
         do $$
         begin
-          -- Receita (1:1 com produto)
+          -- ===== Unidades =====
+          create table if not exists resto.unit (
+            id   bigserial primary key,
+            name text,
+            abbr text not null unique
+          );
+
+          -- ===== Receita (1:1 com produto) =====
           create table if not exists resto.recipe (
               id           bigserial primary key,
               product_id   bigint not null references resto.product(id) on delete cascade,
               yield_qty    numeric(14,3) default 1,
-              overhead_pct numeric(6,2)  default 0,   -- despesas gerais %
-              loss_pct     numeric(6,2)  default 0,   -- perdas/rendimento %
+              overhead_pct numeric(6,3)  default 0,   -- despesas gerais %
+              loss_pct     numeric(6,3)  default 0,   -- perdas/rendimento %
               note         text,
               updated_at   timestamptz default now()
           );
+          -- garante colunas se já existia
+          alter table resto.recipe add column if not exists yield_qty    numeric(14,3) default 1;
+          alter table resto.recipe add column if not exists overhead_pct numeric(6,3)  default 0;
+          alter table resto.recipe add column if not exists loss_pct     numeric(6,3)  default 0;
+          alter table resto.recipe add column if not exists note         text;
+          alter table resto.recipe add column if not exists updated_at   timestamptz default now();
           create unique index if not exists recipe_uq_product on resto.recipe(product_id);
 
-          -- Itens da receita (ingredientes)
+          -- ===== Itens da receita (ingredientes) =====
           create table if not exists resto.recipe_item (
-              id           bigserial primary key,
-              recipe_id    bigint not null references resto.recipe(id) on delete cascade,
-              ingredient_id bigint not null references resto.product(id),
-              qty          numeric(14,3) not null,  -- quantidade na unidade do ingrediente
-              unit_id      bigint,                  -- opcional: unidade exibida
-              conversion_factor numeric(14,6) default 1.0, -- fator adicional (ex. perdas pré-cocção)
-              note         text
+              id                bigserial primary key,
+              recipe_id         bigint not null references resto.recipe(id) on delete cascade,
+              ingredient_id     bigint not null references resto.product(id),
+              qty               numeric(14,3) not null,
+              unit_id           bigint,
+              conversion_factor numeric(14,6) default 1.0,
+              note              text
           );
+          -- garante colunas
+          alter table resto.recipe_item add column if not exists unit_id           bigint;
+          alter table resto.recipe_item add column if not exists conversion_factor numeric(14,6) default 1.0;
+          alter table resto.recipe_item add column if not exists note              text;
           create index if not exists recipe_item_recipe_idx on resto.recipe_item(recipe_id);
 
-          -- Produção (ordem de produção)
+          -- ===== Produção (ordem de produção) =====
           create table if not exists resto.production (
               id          bigserial primary key,
               date        timestamptz default now(),
@@ -643,24 +660,29 @@ def page_producao():
               note        text
           );
 
-          -- Consumo por produção (para rastreabilidade)
+          -- ===== Consumo por produção =====
           create table if not exists resto.production_item (
               id             bigserial primary key,
               production_id  bigint not null references resto.production(id) on delete cascade,
               ingredient_id  bigint not null references resto.product(id),
-              lot_id         bigint,  -- id do purchase_item/lote consumido (se aplicável)
+              lot_id         bigint,
               qty            numeric(14,3) not null,
               unit_cost      numeric(14,4) not null,
               total_cost     numeric(14,2) not null
           );
           create index if not exists prod_item_prod_idx on resto.production_item(production_id);
 
-          -- Campos auxiliares nos produtos (defensivo)
-          alter table resto.product add column if not exists unit        text default 'un';
-          alter table resto.product add column if not exists last_cost   numeric(14,2) default 0;
-          alter table resto.product add column if not exists active      boolean default true;
+          -- Campos úteis em product (defensivo)
+          alter table resto.product add column if not exists unit      text default 'un';
+          alter table resto.product add column if not exists last_cost numeric(14,2) default 0;
+          alter table resto.product add column if not exists active    boolean default true;
         end $$;
         """)
+
+        # Unidades padrão (idempotente)
+        for abbr, name in [("un","Unidade"),("kg","Quilo"),("g","Grama"),("L","Litro"),
+                           ("ml","Mililitro"),("cx","Caixa"),("pct","Pacote")]:
+            qexec("insert into resto.unit(abbr,name) values (%s,%s) on conflict (abbr) do nothing;", (abbr, name))
 
     _ensure_production_schema()
 
@@ -700,18 +722,25 @@ def page_producao():
                 with colr1:
                     r_yield = st.number_input("Rendimento (quantidade produzida)", min_value=0.001, step=0.001, value=1.000)
                 with colr2:
-                    r_over = st.number_input("Overhead (%)", min_value=0.0, step=0.5, value=0.0, format="%.2f")
+                    r_over = st.number_input("Overhead (%)", min_value=0.0, step=0.1, value=0.0, format="%.1f")
                 with colr3:
-                    r_loss = st.number_input("Perdas (%)", min_value=0.0, step=0.5, value=0.0, format="%.2f")
+                    r_loss = st.number_input("Perdas (%)", min_value=0.0, step=0.1, value=0.0, format="%.1f")
                 note = st.text_area("Observações (opcional)", value="")
                 ok_new = st.form_submit_button("➕ Criar ficha técnica")
             if ok_new:
+                # UPSERT por product_id para evitar erro de duplicidade / colunas ausentes
                 newr = qone("""
                     insert into resto.recipe (product_id, yield_qty, overhead_pct, loss_pct, note)
                     values (%s,%s,%s,%s,%s)
+                    on conflict (product_id) do update
+                        set yield_qty    = excluded.yield_qty,
+                            overhead_pct = excluded.overhead_pct,
+                            loss_pct     = excluded.loss_pct,
+                            note         = excluded.note,
+                            updated_at   = now()
                     returning *;
                 """, (prod_id, float(r_yield), float(r_over), float(r_loss), note or None))
-                st.success("Ficha técnica criada.")
+                st.success("Ficha técnica criada/atualizada.")
                 _rerun()
             card_end()
             return
@@ -723,11 +752,11 @@ def page_producao():
                 r_yield = st.number_input("Rendimento (quantidade produzida)", min_value=0.001, step=0.001,
                                           value=float(recipe.get("yield_qty") or 1.0), format="%.3f")
             with colr2:
-                r_over = st.number_input("Overhead (%)", min_value=0.0, step=0.5,
-                                         value=float(recipe.get("overhead_pct") or 0.0), format="%.2f")
+                r_over = st.number_input("Overhead (%)", min_value=0.0, step=0.1,
+                                         value=float(recipe.get("overhead_pct") or 0.0), format="%.1f")
             with colr3:
-                r_loss = st.number_input("Perdas (%)", min_value=0.0, step=0.5,
-                                         value=float(recipe.get("loss_pct") or 0.0), format="%.2f")
+                r_loss = st.number_input("Perdas (%)", min_value=0.0, step=0.1,
+                                         value=float(recipe.get("loss_pct") or 0.0), format="%.1f")
             note = st.text_area("Observações", value=recipe.get("note") or "", height=70)
             ok_upd = st.form_submit_button("💾 Salvar parâmetros")
         if ok_upd:
