@@ -27,7 +27,7 @@ import streamlit as st
 
 # ===================== CONFIG =====================
 st.set_page_config(
-    page_title="Restô ERP Lite",
+    page_title="SISGET",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -200,7 +200,7 @@ def _rerun():
 # ===================== Pages =====================
 
 def page_dashboard():
-    header("📊 Painel", "Visão geral do financeiro, estoque e validade.")
+    header("📊 Painel", "Visão geral do SISGET.")
     col1, col2, col3 = st.columns(3)
 
     stock = qone("select coalesce(sum(stock_qty * avg_cost),0) as val, coalesce(sum(stock_qty),0) as qty from resto.product;") or {}
@@ -691,24 +691,70 @@ def page_producao():
     st.success(f"Produção #{production_id} registrada. CMP do produto final atualizado.")
     st.markdown(f"**Custo do lote:** {money(batch_cost)} • **Custo unitário aplicado no CMP:** {money(unit_cost_est)}")
     card_end()
-
+    
+# ===================== ESTOQUE =====================
 def page_estoque():
-    header("📦 Estoque", "Saldos, movimentos e lotes/validade.")
-    tabs = st.tabs(["Saldos", "Movimentos", "Lotes & Validade"]) 
+    # helper de rerun compatível
+    def _rerun():
+        try:
+            st.rerun()
+        except Exception:
+            if hasattr(st, "experimental_rerun"):
+                st.experimental_rerun()
 
+    # garante tabelas/colunas necessárias sem mexer no que já existe
+    def _ensure_inventory_schema():
+        qexec("""
+        create table if not exists resto.supplier (
+            id          bigserial primary key,
+            name        text not null,
+            doc         varchar(32),
+            phone       text,
+            email       text,
+            note        text,
+            active      boolean default true,
+            created_at  timestamptz default now()
+        );
+
+        -- Campos úteis no cadastro de produtos (não interfere no que já existe)
+        alter table resto.product add column if not exists unit        text default 'un';
+        alter table resto.product add column if not exists category    text;
+        alter table resto.product add column if not exists supplier_id bigint references resto.supplier(id);
+        alter table resto.product add column if not exists barcode     text;
+        alter table resto.product add column if not exists min_stock   numeric(14,3) default 0;
+        alter table resto.product add column if not exists last_cost   numeric(14,2) default 0;
+        alter table resto.product add column if not exists active      boolean default true;
+
+        create index if not exists supplier_name_idx on resto.supplier (lower(name));
+        create index if not exists product_name_idx  on resto.product  (lower(name));
+        """)
+
+    _ensure_inventory_schema()
+
+    header("📦 Estoque", "Saldos, movimentos e lotes/validade.")
+    tabs = st.tabs(["Saldos", "Movimentos", "Lotes & Validade", "Cadastro"])
+
+    # ============ Aba: Saldos ============
     with tabs[0]:
         card_start()
         rows = qall("select * from resto.v_stock order by name;")
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows or []), use_container_width=True, hide_index=True)
         card_end()
 
+    # ============ Aba: Movimentos ============
     with tabs[1]:
         card_start()
         st.subheader("Movimentações recentes")
-        mv = qall("select move_date, kind, product_id, qty, unit_cost, total_cost, reason, reference_id, note from resto.inventory_movement order by move_date desc limit 500;")
-        st.dataframe(pd.DataFrame(mv), use_container_width=True, hide_index=True)
+        mv = qall("""
+            select move_date, kind, product_id, qty, unit_cost, total_cost, reason, reference_id, note
+              from resto.inventory_movement
+          order by move_date desc
+             limit 500;
+        """)
+        st.dataframe(pd.DataFrame(mv or []), use_container_width=True, hide_index=True)
         card_end()
 
+    # ============ Aba: Lotes & Validade ============
     with tabs[2]:
         card_start()
         st.subheader("Alertas de validade e saldos por lote")
@@ -730,12 +776,253 @@ def page_estoque():
                and (pi.expiry_date - current_date) <= %s
              order by pi.expiry_date asc;
         """, (dias,))
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(rows or [])
         if not df.empty:
             df["dias_restantes"] = df["dias_restantes"].astype(int)
             st.dataframe(df, use_container_width=True, hide_index=True)
         else:
             st.caption("Nenhum lote dentro do período selecionado.")
+        card_end()
+
+    # ============ Aba: Cadastro (Insumos & Fornecedores) ============
+    with tabs[3]:
+        card_start()
+        st.subheader("👤 Fornecedores")
+
+        # ---- Formulário: novo fornecedor
+        with st.form("form_new_supplier"):
+            c1, c2 = st.columns([2,1])
+            with c1:
+                sp_name  = st.text_input("Nome do fornecedor *")
+                sp_doc   = st.text_input("Documento (CNPJ/CPF)", value="")
+                sp_email = st.text_input("E-mail", value="")
+            with c2:
+                sp_phone = st.text_input("Telefone", value="")
+                sp_active = st.checkbox("Ativo", value=True)
+            sp_note = st.text_area("Observações", value="", height=80)
+            sp_submit = st.form_submit_button("➕ Adicionar fornecedor")
+        if sp_submit:
+            if not sp_name.strip():
+                st.warning("Informe o nome do fornecedor.")
+            else:
+                qexec("""
+                    insert into resto.supplier (name, doc, phone, email, note, active)
+                    values (%s, %s, %s, %s, %s, %s);
+                """, (sp_name.strip(), sp_doc or None, sp_phone or None, sp_email or None, sp_note or None, sp_active))
+                st.success("Fornecedor adicionado.")
+                _rerun()
+
+        # ---- Lista/edição de fornecedores
+        sup = qall("select id, name, doc, phone, email, active from resto.supplier order by name;") or []
+        df_sup = pd.DataFrame(sup)
+        if not df_sup.empty:
+            df_sup["Excluir?"] = False
+            cfg_sup = {
+                "id":     st.column_config.NumberColumn("ID", disabled=True),
+                "name":   st.column_config.TextColumn("Nome"),
+                "doc":    st.column_config.TextColumn("Documento"),
+                "phone":  st.column_config.TextColumn("Telefone"),
+                "email":  st.column_config.TextColumn("E-mail"),
+                "active": st.column_config.CheckboxColumn("Ativo"),
+                "Excluir?": st.column_config.CheckboxColumn("Excluir?", help="Marca para excluir"),
+            }
+            edited_sup = st.data_editor(df_sup, column_config=cfg_sup, hide_index=True, num_rows="fixed", key="sup_editor", use_container_width=True)
+
+            colA, colB = st.columns(2)
+            with colA:
+                apply_sup = st.button("💾 Salvar alterações (fornecedores)")
+            with colB:
+                refresh_sup = st.button("🔄 Atualizar lista")
+
+            if refresh_sup:
+                _rerun()
+
+            if apply_sup:
+                orig = df_sup.set_index("id")
+                new  = edited_sup.set_index("id")
+                upd = 0; delc = 0; err = 0
+
+                # exclusões
+                to_del = new.index[new["Excluir?"] == True].tolist()
+                for sid in to_del:
+                    try:
+                        # tentativa de excluir; se houver produtos vinculados, vai falhar por FK (se existir) ou por lógica de negócios
+                        qexec("delete from resto.supplier where id=%s;", (sid,))
+                        delc += 1
+                    except Exception:
+                        err += 1
+
+                # updates
+                keep_ids = [i for i in new.index if i not in to_del]
+                for sid in keep_ids:
+                    a = orig.loc[sid]; b = new.loc[sid]
+                    if any(str(a.get(f,"")) != str(b.get(f,"")) for f in ["name","doc","phone","email","active"]):
+                        try:
+                            qexec("""
+                                update resto.supplier
+                                   set name=%s, doc=%s, phone=%s, email=%s, active=%s
+                                 where id=%s;
+                            """, (b["name"], b.get("doc"), b.get("phone"), b.get("email"), bool(b.get("active")), int(sid)))
+                            upd += 1
+                        except Exception:
+                            err += 1
+                st.success(f"Fornecedor: ✅ {upd} atualizado(s) • 🗑️ {delc} excluído(s) • ⚠️ {err} erro(s).")
+                _rerun()
+        else:
+            st.caption("Nenhum fornecedor cadastrado.")
+
+        st.divider()
+        st.subheader("🧂 Insumos / Produtos")
+
+        # ---- Carregar fornecedores p/ select
+        sup_rows = qall("select id, name from resto.supplier where active is true order by name;") or []
+        sup_opts = [(None, "— sem fornecedor —")] + [(r["id"], r["name"]) for r in sup_rows]
+
+        # ---- Formulário: novo produto
+        with st.form("form_new_product"):
+            p1, p2, p3 = st.columns([2,1,1])
+            with p1:
+                pr_name = st.text_input("Nome do insumo *")
+                pr_cat  = st.text_input("Categoria (livre)", value="")
+            with p2:
+                pr_unit = st.selectbox("Unidade", ["un","kg","g","L","ml","cx","pct"], index=0)
+                pr_min  = st.number_input("Estoque mínimo", min_value=0.0, step=0.001, format="%.3f")
+            with p3:
+                pr_cost = st.number_input("Custo (última compra)", min_value=0.0, step=0.01, format="%.2f")
+                pr_bar  = st.text_input("Código de barras", value="")
+            s1, s2 = st.columns(2)
+            with s1:
+                pr_sup = st.selectbox("Fornecedor", options=sup_opts, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+            with s2:
+                pr_active = st.checkbox("Ativo", value=True)
+            pr_submit = st.form_submit_button("➕ Adicionar insumo")
+
+        if pr_submit:
+            if not pr_name.strip():
+                st.warning("Informe o nome do insumo.")
+            else:
+                qexec("""
+                    insert into resto.product (name, unit, category, supplier_id, barcode, min_stock, last_cost, active)
+                    values (%s, %s, %s, %s, %s, %s, %s, %s);
+                """, (pr_name.strip(), pr_unit, pr_cat or None,
+                      (pr_sup[0] if isinstance(pr_sup, tuple) else None),
+                      pr_bar or None, float(pr_min), float(pr_cost), pr_active))
+                st.success("Insumo cadastrado.")
+                _rerun()
+
+        # ---- Filtros de produtos
+        f1, f2, f3, f4 = st.columns([2,1,1,1])
+        with f1:
+            p_q = st.text_input("Buscar (nome/código/categoria)", key="prod_q")
+        with f2:
+            p_cat = st.text_input("Filtrar por categoria (opcional)", key="prod_cat")
+        with f3:
+            p_supf = st.selectbox("Fornecedor (filtro)", options=[(0,"— todos —")] + [(r["id"], r["name"]) for r in sup_rows],
+                                  format_func=lambda x: x[1], key="prod_supf")
+        with f4:
+            p_only_active = st.checkbox("Somente ativos", value=True, key="prod_only_active")
+
+        wh = []
+        pr = []
+        if p_q.strip():
+            wh.append("(lower(p.name) like lower(%s) or lower(coalesce(p.category,'')) like lower(%s) or coalesce(p.barcode,'') like %s)")
+            like = f"%{p_q.strip()}%"
+            pr += [like, like, like]
+        if p_cat.strip():
+            wh.append("lower(coalesce(p.category,'')) = lower(%s)")
+            pr.append(p_cat.strip())
+        if p_supf and isinstance(p_supf, tuple) and p_supf[0] != 0:
+            wh.append("p.supplier_id = %s")
+            pr.append(int(p_supf[0]))
+        if p_only_active:
+            wh.append("p.active is true")
+
+        sql_list = f"""
+            select p.id, p.name, p.unit, p.category, p.min_stock, p.last_cost, p.barcode, p.active,
+                   s.name as supplier
+              from resto.product p
+              left join resto.supplier s on s.id = p.supplier_id
+             {"where " + " and ".join(wh) if wh else ""}
+             order by lower(p.name)
+             limit 1000;
+        """
+        prows = qall(sql_list, tuple(pr)) or []
+        dfp = pd.DataFrame(prows)
+
+        st.markdown("### Lista de insumos")
+        if not dfp.empty:
+            dfp["Excluir?"] = False
+            cfg_p = {
+                "id":        st.column_config.NumberColumn("ID", disabled=True),
+                "name":      st.column_config.TextColumn("Nome"),
+                "unit":      st.column_config.SelectboxColumn("Un", options=["un","kg","g","L","ml","cx","pct"]),
+                "category":  st.column_config.TextColumn("Categoria"),
+                "supplier":  st.column_config.TextColumn("Fornecedor", disabled=True),
+                "min_stock": st.column_config.NumberColumn("Est. mín.", step=0.001, format="%.3f"),
+                "last_cost": st.column_config.NumberColumn("Custo", step=0.01, format="%.2f"),
+                "barcode":   st.column_config.TextColumn("Código"),
+                "active":    st.column_config.CheckboxColumn("Ativo"),
+                "Excluir?":  st.column_config.CheckboxColumn("Excluir?", help="Marca para excluir este insumo"),
+            }
+
+            edited_p = st.data_editor(
+                dfp[["id","name","unit","category","supplier","min_stock","last_cost","barcode","active","Excluir?"]],
+                column_config=cfg_p,
+                hide_index=True,
+                num_rows="fixed",
+                key="prod_editor",
+                use_container_width=True
+            )
+
+            cpa, cpb = st.columns(2)
+            with cpa:
+                apply_p = st.button("💾 Salvar alterações (insumos)")
+            with cpb:
+                refresh_p = st.button("🔄 Atualizar")
+
+            if refresh_p:
+                _rerun()
+
+            if apply_p:
+                orig = dfp.set_index("id")
+                new  = edited_p.set_index("id")
+                upd = 0; delc = 0; err = 0
+
+                # exclusões
+                to_del = new.index[new["Excluir?"] == True].tolist()
+                for pid in to_del:
+                    try:
+                        # se houver movimentos vinculados, o banco pode vetar; trate o erro
+                        qexec("delete from resto.product where id=%s;", (pid,))
+                        delc += 1
+                    except Exception:
+                        err += 1
+
+                # updates
+                keep_ids = [i for i in new.index if i not in to_del]
+                for pid in keep_ids:
+                    a = orig.loc[pid]; b = new.loc[pid]
+                    changed = any(str(a.get(f,"")) != str(b.get(f,"")) for f in
+                                  ["name","unit","category","min_stock","last_cost","barcode","active"])
+                    if not changed:
+                        continue
+                    try:
+                        qexec("""
+                            update resto.product
+                               set name=%s, unit=%s, category=%s, min_stock=%s, last_cost=%s, barcode=%s, active=%s
+                             where id=%s;
+                        """, (b["name"], b["unit"], b.get("category"),
+                              float(b.get("min_stock") or 0), float(b.get("last_cost") or 0),
+                              b.get("barcode"), bool(b.get("active")), int(pid)))
+                        upd += 1
+                    except Exception:
+                        err += 1
+
+                st.success(f"Insumos: ✅ {upd} atualizado(s) • 🗑️ {delc} excluído(s) • ⚠️ {err} erro(s).")
+                _rerun()
+        else:
+            st.caption("Nenhum insumo encontrado para os filtros.")
+
         card_end()
 
 
