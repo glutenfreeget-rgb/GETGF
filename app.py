@@ -1002,10 +1002,26 @@ def page_estoque():
             if hasattr(st, "experimental_rerun"):
                 st.experimental_rerun()
 
+    # --- debug: mostra colunas da resto.product (ajuda quando der erro)
+    def _debug_product_columns():
+        cols = qall("""
+            select column_name,
+                   is_nullable,
+                   column_default,
+                   data_type
+              from information_schema.columns
+             where table_schema='resto' and table_name='product'
+             order by ordinal_position;
+        """) or []
+        if cols:
+            st.info("Diagnóstico da tabela resto.product (colunas / null / default / tipo):")
+            st.dataframe(pd.DataFrame(cols), use_container_width=True, hide_index=True)
+
     # --- garante tabelas/colunas necessárias sem quebrar o que já existe
     def _ensure_inventory_schema():
         qexec("""
         do $$
+        declare r record;
         begin
           -- tabela de fornecedores
           create table if not exists resto.supplier (
@@ -1024,7 +1040,7 @@ def page_estoque():
           -- índices úteis
           create index if not exists supplier_name_idx on resto.supplier (lower(name));
 
-          -- campos úteis no cadastro de produtos
+          -- produto: garante campos mínimos
           alter table resto.product  add column if not exists unit        text default 'un';
           alter table resto.product  add column if not exists category    text;
           alter table resto.product  add column if not exists supplier_id bigint references resto.supplier(id);
@@ -1032,20 +1048,39 @@ def page_estoque():
           alter table resto.product  add column if not exists min_stock   numeric(14,3) default 0;
           alter table resto.product  add column if not exists last_cost   numeric(14,2) default 0;
           alter table resto.product  add column if not exists active      boolean default true;
+          alter table resto.product  add column if not exists created_at  timestamptz default now();
 
           create index if not exists product_name_idx  on resto.product (lower(name));
 
-          -- Tenta relaxar NOT NULL se existir (ignora erros)
+          -- relaxa NOT NULL das colunas problemáticas conhecidas
           begin
             alter table resto.product alter column supplier_id drop not null;
-          exception when others then
-            null;
-          end;
+          exception when others then null; end;
+
           begin
             alter table resto.product alter column category drop not null;
-          exception when others then
-            null;
-          end;
+          exception when others then null; end;
+
+          begin
+            alter table resto.product alter column barcode drop not null;
+          exception when others then null; end;
+
+          -- relaxa NOT NULL de QUALQUER coluna extra que seja NOT NULL sem default (exceto as padrões e id)
+          for r in
+            select column_name
+              from information_schema.columns
+             where table_schema='resto'
+               and table_name='product'
+               and is_nullable='NO'
+               and column_default is null
+               and column_name not in ('id','name','unit','category','supplier_id',
+                                       'barcode','min_stock','last_cost','active','created_at')
+          loop
+            begin
+              execute format('alter table resto.product alter column %I drop not null', r.column_name);
+            exception when others then null;
+            end;
+          end loop;
         end $$;
         """)
 
@@ -1258,14 +1293,21 @@ def page_estoque():
                 # categoria padrão "Geral" se vier vazia
                 cat_to_use = (pr_cat or "Geral").strip()
 
-                qexec("""
-                    insert into resto.product (name, unit, category, supplier_id, barcode, min_stock, last_cost, active)
-                    values (%s, %s, %s, %s, %s, %s, %s, %s);
-                """, (pr_name.strip(), pr_unit, cat_to_use,
-                      int(supplier_id_to_use),
-                      pr_bar or None, float(pr_min), float(pr_cost), pr_active))
-                st.success("Insumo cadastrado.")
-                _rerun()
+                # barcode como string vazia em vez de NULL (evita NOT NULL antigos)
+                barcode_to_use = pr_bar if (pr_bar or "").strip() != "" else ""
+
+                try:
+                    qexec("""
+                        insert into resto.product (name, unit, category, supplier_id, barcode, min_stock, last_cost, active)
+                        values (%s, %s, %s, %s, %s, %s, %s, %s);
+                    """, (pr_name.strip(), pr_unit, cat_to_use,
+                          int(supplier_id_to_use),
+                          barcode_to_use, float(pr_min), float(pr_cost), pr_active))
+                    st.success("Insumo cadastrado.")
+                    _rerun()
+                except Exception:
+                    st.error("Falha ao inserir insumo. Mostrando diagnóstico da tabela para localizar coluna NOT NULL sem default.")
+                    _debug_product_columns()
 
         # ---- Filtros de produtos
         f1, f2, f3, f4 = st.columns([2,1,1,1])
@@ -1381,6 +1423,7 @@ def page_estoque():
             st.caption("Nenhum insumo encontrado para os filtros.")
 
         card_end()
+
 
 
 
