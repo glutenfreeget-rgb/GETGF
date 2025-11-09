@@ -253,8 +253,53 @@ def page_dashboard():
             st.caption("Nenhum lote a vencer nos próximos 30 dias.")
         card_end()
 
-
+#======================================CADSTROS=================================================================================
 def page_cadastros():
+    import pandas as pd
+
+    # ——— defensivo: garante colunas/índices necessários ———
+    def _ensure_schema():
+        qexec("""
+        do $$
+        begin
+          -- preço fiscal no produto
+          if not exists (
+            select 1 from information_schema.columns
+             where table_schema='resto' and table_name='product' and column_name='sale_price'
+          ) then
+            alter table resto.product add column sale_price numeric(14,2) default 0;
+          end if;
+
+          -- dica/observação na unidade (usada no form)
+          if not exists (
+            select 1 from information_schema.columns
+             where table_schema='resto' and table_name='unit' and column_name='base_hint'
+          ) then
+            alter table resto.unit add column base_hint text;
+          end if;
+
+          -- índice único para permitir ON CONFLICT (abbr)
+          if not exists (
+            select 1
+              from pg_indexes
+             where schemaname='resto' and indexname='unit_abbr_uq'
+          ) then
+            create unique index unit_abbr_uq on resto.unit(abbr);
+          end if;
+
+          -- opcional: garantir unicidade de categoria por nome (para ON CONFLICT(name))
+          if not exists (
+            select 1
+              from pg_indexes
+             where schemaname='resto' and indexname='category_name_uq'
+          ) then
+            create unique index category_name_uq on resto.category(name);
+          end if;
+        end $$;
+        """)
+
+    _ensure_schema()
+
     header("🗂️ Cadastros", "Unidades, Categorias, Produtos e Fornecedores.")
     tabs = st.tabs(["Unidades", "Categorias", "Fornecedores", "Produtos"])
 
@@ -268,7 +313,13 @@ def page_cadastros():
             base_hint = st.text_input("Observação/Conversão", value="ex: 1 un = 25 g (dica)")
             ok = st.form_submit_button("Salvar unidade")
         if ok and name and abbr:
-            qexec("insert into resto.unit(name, abbr, base_hint) values (%s,%s,%s) on conflict (abbr) do update set name=excluded.name, base_hint=excluded.base_hint;", (name, abbr, base_hint))
+            qexec("""
+                insert into resto.unit(name, abbr, base_hint)
+                values (%s,%s,%s)
+                on conflict (abbr) do update
+                  set name=excluded.name,
+                      base_hint=excluded.base_hint;
+            """, (name, abbr, base_hint))
             st.success("Unidade salva!")
         units = qall("select id, name, abbr, base_hint from resto.unit order by abbr;")
         st.dataframe(pd.DataFrame(units), use_container_width=True, hide_index=True)
@@ -319,32 +370,46 @@ def page_cadastros():
         with st.form("form_prod"):
             code = st.text_input("Código interno")
             name = st.text_input("Nome *")
-            category_id = st.selectbox("Categoria", options=[(c['id'], c['name']) for c in cats], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if cats else None)
-            unit_id = st.selectbox("Unidade *", options=[(u['id'], u['abbr']) for u in units], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if units else None)
+            category_id = st.selectbox(
+                "Categoria",
+                options=[(c['id'], c['name']) for c in cats],
+                format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+                index=0 if cats else None
+            )
+            unit_id = st.selectbox(
+                "Unidade *",
+                options=[(u['id'], u['abbr']) for u in units],
+                format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+                index=0 if units else None
+            )
 
             st.markdown("**Campos fiscais (opcional)**")
             colf1, colf2, colf3, colf4 = st.columns(4)
             with colf1:
-                ncm = st.text_input("NCM") ; cest = st.text_input("CEST")
+                ncm = st.text_input("NCM");        cest = st.text_input("CEST")
             with colf2:
-                cfop = st.text_input("CFOP Venda") ; csosn = st.text_input("CSOSN")
+                cfop = st.text_input("CFOP Venda"); csosn = st.text_input("CSOSN")
             with colf3:
-                cst_icms = st.text_input("CST ICMS") ; ali_icms = st.number_input("Alíquota ICMS %", 0.0, 100.0, 0.0, 0.01)
+                cst_icms = st.text_input("CST ICMS"); ali_icms = st.number_input("Alíquota ICMS %", 0.0, 100.0, 0.0, 0.01)
             with colf4:
-                cst_pis = st.text_input("CST PIS") ; ali_pis = st.number_input("Alíquota PIS %", 0.0, 100.0, 0.0, 0.01)
+                cst_pis = st.text_input("CST PIS");   ali_pis = st.number_input("Alíquota PIS %", 0.0, 100.0, 0.0, 0.01)
             colf5, colf6 = st.columns(2)
             with colf5:
-                cst_cof = st.text_input("CST COFINS") ; ali_cof = st.number_input("Alíquota COFINS %", 0.0, 100.0, 0.0, 0.01)
+                cst_cof = st.text_input("CST COFINS"); ali_cof = st.number_input("Alíquota COFINS %", 0.0, 100.0, 0.0, 0.01)
             with colf6:
                 iss = st.number_input("ISS % (se serviço)", 0.0, 100.0, 0.0, 0.01)
 
-            colb1, colb2, colb3 = st.columns(3)
-            with colb1:
+            st.markdown("**Comercial / preço**")
+            colp1, colp2, colp3 = st.columns(3)
+            with colp1:
                 is_sale = st.checkbox("Item de venda", value=True)
-            with colb2:
+            with colp2:
                 is_ing  = st.checkbox("Ingrediente", value=False)
-            with colb3:
+            with colp3:
                 markup = st.number_input("Markup padrão %", 0.0, 1000.0, 0.0, 0.1)
+
+            # >>> NOVO: valor unitário fiscal (sale_price)
+            price = st.number_input("Valor unitário fiscal (R$)", min_value=0.0, step=0.01, format="%.2f")
 
             ok = st.form_submit_button("Salvar produto")
 
@@ -352,23 +417,53 @@ def page_cadastros():
             cat_id = category_id[0] if isinstance(category_id, tuple) else None
             uni_id = unit_id[0] if isinstance(unit_id, tuple) else None
             qexec("""
-                insert into resto.product(code, name, category_id, unit_id, ncm, cest, cfop_venda, csosn, cst_icms, aliquota_icms, cst_pis, aliquota_pis, cst_cofins, aliquota_cofins, iss_aliquota, is_sale_item, is_ingredient, default_markup)
-                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                insert into resto.product(
+                    code, name, category_id, unit_id,
+                    ncm, cest, cfop_venda, csosn, cst_icms, aliquota_icms,
+                    cst_pis, aliquota_pis, cst_cofins, aliquota_cofins, iss_aliquota,
+                    is_sale_item, is_ingredient, default_markup,
+                    sale_price
+                )
+                values (%s,%s,%s,%s,
+                        %s,%s,%s,%s,%s,%s,
+                        %s,%s,%s,%s,%s,
+                        %s,%s,%s,
+                        %s)
                 on conflict (name) do update set
-                  code=excluded.code, category_id=excluded.category_id, unit_id=excluded.unit_id,
-                  ncm=excluded.ncm, cest=excluded.cest, cfop_venda=excluded.cfop_venda, csosn=excluded.csosn,
-                  cst_icms=excluded.cst_icms, aliquota_icms=excluded.aliquota_icms,
-                  cst_pis=excluded.cst_pis, aliquota_pis=excluded.aliquota_pis,
-                  cst_cofins=excluded.cst_cofins, aliquota_cofins=excluded.aliquota_cofins,
-                  iss_aliquota=excluded.iss_aliquota, is_sale_item=excluded.is_sale_item, is_ingredient=excluded.is_ingredient, default_markup=excluded.default_markup;
-            """, (code, name, cat_id, uni_id, ncm, cest, cfop, csosn, cst_icms, ali_icms, cst_pis, ali_pis, cst_cof, ali_cof, iss, is_sale, is_ing, markup))
+                  code=excluded.code,
+                  category_id=excluded.category_id,
+                  unit_id=excluded.unit_id,
+                  ncm=excluded.ncm,
+                  cest=excluded.cest,
+                  cfop_venda=excluded.cfop_venda,
+                  csosn=excluded.csosn,
+                  cst_icms=excluded.cst_icms,
+                  aliquota_icms=excluded.aliquota_icms,
+                  cst_pis=excluded.cst_pis,
+                  aliquota_pis=excluded.aliquota_pis,
+                  cst_cofins=excluded.cst_cofins,
+                  aliquota_cofins=excluded.aliquota_cofins,
+                  iss_aliquota=excluded.iss_aliquota,
+                  is_sale_item=excluded.is_sale_item,
+                  is_ingredient=excluded.is_ingredient,
+                  default_markup=excluded.default_markup,
+                  sale_price=excluded.sale_price;
+            """, (code, name, cat_id, uni_id,
+                  ncm, cest, cfop, csosn, cst_icms, ali_icms,
+                  cst_pis, ali_pis, cst_cof, ali_cof, iss,
+                  is_sale, is_ing, markup,
+                  float(price)))
             st.success("Produto salvo!")
 
-        prods = qall("select id, code, name, stock_qty, avg_cost, last_cost from resto.product order by name;")
+        prods = qall("""
+            select id, code, name, stock_qty, avg_cost, last_cost, sale_price
+              from resto.product
+             order by name;
+        """)
         st.dataframe(pd.DataFrame(prods), use_container_width=True, hide_index=True)
         card_end()
 
-
+#==========================================================COMPRAS===========================================================================
 def page_compras():
     header("📥 Compras", "Lançar notas e lotes com validade.")
     suppliers = qall("select id, name from resto.supplier order by name;")
