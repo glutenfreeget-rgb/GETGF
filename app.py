@@ -604,7 +604,7 @@ def page_producao():
     def _ensure_production_schema():
         """
         Garante todas as tabelas/colunas necessárias e NORMALIZA defaults para evitar NotNullViolation
-        em bancos existentes (created_at/updated_at/yield_pct/etc).
+        e ignora duplicidades de unidades com ON CONFLICT DO NOTHING (sem alvo).
         """
         # 1) Tabelas base + colunas com defaults seguros
         qexec("""
@@ -628,7 +628,6 @@ def page_producao():
             created_at   timestamptz default now(),
             updated_at   timestamptz default now()
           );
-          -- índice único da receita por produto
           create unique index if not exists recipe_uq_product on resto.recipe(product_id);
 
           -- Itens da receita
@@ -656,7 +655,7 @@ def page_producao():
             note        text
           );
 
-          -- Consumo por produção (rastreiabilidade)
+          -- Consumo por produção
           create table if not exists resto.production_item (
             id             bigserial primary key,
             production_id  bigint not null references resto.production(id) on delete cascade,
@@ -675,26 +674,23 @@ def page_producao():
         end $$;
         """)
 
-        # 2) NORMALIZAÇÃO: se o schema já existia com NOT NULL sem default, seta default e corrige nulos
-        # created_at / updated_at
+        # 2) NORMALIZAÇÃO: defaults + preencher nulos (evita NotNullViolation em bancos antigos)
         qexec("alter table resto.recipe add column if not exists created_at timestamptz;")
         qexec("alter table resto.recipe add column if not exists updated_at timestamptz;")
         qexec("alter table resto.recipe alter column created_at set default now();")
         qexec("alter table resto.recipe alter column updated_at set default now();")
         qexec("update resto.recipe set created_at = now() where created_at is null;")
         qexec("update resto.recipe set updated_at = now() where updated_at is null;")
-        # yield/overhead/loss
+        qexec("alter table resto.recipe alter column created_at set not null;")
+        qexec("alter table resto.recipe alter column updated_at set not null;")
         qexec("alter table resto.recipe alter column yield_qty set default 1;")
         qexec("alter table resto.recipe alter column overhead_pct set default 0;")
         qexec("alter table resto.recipe alter column loss_pct set default 0;")
         qexec("update resto.recipe set yield_qty = 1 where yield_qty is null;")
         qexec("update resto.recipe set overhead_pct = 0 where overhead_pct is null;")
         qexec("update resto.recipe set loss_pct = 0 where loss_pct is null;")
-        # (opcional) tornar NOT NULL agora que há default e dados saneados
-        qexec("alter table resto.recipe alter column created_at set not null;")
-        qexec("alter table resto.recipe alter column updated_at set not null;")
 
-        # 3) Semeia unidades básicas (idempotente)
+        # 3) Semeia unidades — ignora QUALQUER conflito (abbr OU name) para evitar UniqueViolation
         base_units = [
             ("un", "Unidade"),
             ("kg", "Quilograma"),
@@ -705,7 +701,11 @@ def page_producao():
             ("pct","Pacote")
         ]
         for abbr, name in base_units:
-            qexec("insert into resto.unit(abbr,name) values (%s,%s) on conflict (abbr) do nothing;", (abbr, name))
+            qexec("""
+                insert into resto.unit(abbr,name)
+                values (%s,%s)
+                on conflict do nothing;
+            """, (abbr, name))
 
     _ensure_production_schema()
 
@@ -753,7 +753,6 @@ def page_producao():
                 note = st.text_area("Observações (opcional)", value="", height=70)
                 ok_new = st.form_submit_button("➕ Criar ficha técnica")
             if ok_new:
-                # insert compatível com schemas antigos (colunas com default já garantidas)
                 newr = qone("""
                     insert into resto.recipe (product_id, yield_qty, overhead_pct, loss_pct, note)
                     values (%s,%s,%s,%s,%s)
@@ -764,7 +763,7 @@ def page_producao():
             card_end()
             return
 
-        # edição dos parâmetros da receita
+        # edição dos parâmetros
         with st.form(f"form_update_recipe_{recipe['id']}"):
             colr1, colr2, colr3 = st.columns(3)
             with colr1:
@@ -902,7 +901,7 @@ def page_producao():
                 st.success("Ingrediente incluído na ficha técnica.")
                 _rerun()
 
-        # pré-cálculo de custo por rendimento usando last_cost dos ingredientes
+        # custo estimado
         cost_rows = qall("""
             select ri.qty, ri.conversion_factor, coalesce(p.last_cost,0) as last_cost
               from resto.recipe_item ri
@@ -953,7 +952,7 @@ def page_producao():
             card_end()
             return
 
-        # Carrega ingredientes da receita
+        # ingredientes da receita
         ingredients = qall("""
             select ri.ingredient_id, p.name as ingrediente, ri.qty, ri.conversion_factor, ri.unit_id
               from resto.recipe_item ri
@@ -967,15 +966,15 @@ def page_producao():
             card_end()
             return
 
-        # Escala e aloca por FIFO (função fifo_allocate deve existir no seu DB)
+        # Escala e aloca por FIFO
         scale = float(qty_out) / yield_qty
-        consumos = []   # [{ingredient_id, ingrediente, lot_id, qty, unit_cost, total}]
+        consumos = []
         total_ing_cost = 0.0
         faltantes = []
 
         for it in ingredients:
             need = float(it["qty"] or 0.0) * float(it.get("conversion_factor") or 1.0) * scale
-            allocs = fifo_allocate(it["ingredient_id"], need)  # -> lista de {lot_id, qty, unit_cost}
+            allocs = fifo_allocate(it["ingredient_id"], need)  # [{lot_id, qty, unit_cost}]
             got = sum(a["qty"] for a in allocs)
             if got + 1e-9 < need:
                 faltantes.append((it["ingrediente"], need, got))
@@ -1010,7 +1009,7 @@ def page_producao():
               (lot_final or None), (str(expiry_final) if expiry_final else None), ""))
         production_id = prow["id"]
 
-        # Saída dos ingredientes (OUT) por lote + rastreabilidade
+        # Saída dos ingredientes (OUT) por lote
         for c in consumos:
             pi = qone("""
                 insert into resto.production_item(production_id, ingredient_id, lot_id, qty, unit_cost, total_cost)
