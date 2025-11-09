@@ -504,88 +504,205 @@ def page_vendas():
         st.session_state["sale_itens"] = []  # limpa carrinho
         st.success(f"Venda #{sale_id} fechada e estoque baixado!")
 
+# ===================== PRECIFICAÇÃO =====================
 def page_receitas_precos():
-    header("🥣 Fichas Técnicas & Precificação", "Monte receitas e calcule preço sugerido.")
-    prods = qall("select id, name from resto.product order by name;")
-    units = qall("select id, abbr from resto.unit order by abbr;")
+    import pandas as pd
 
-    tab = st.tabs(["Receitas", "Precificação"])  # 0: receita, 1: precificação
+    # Helpers
+    def _rerun():
+        try:
+            st.rerun()
+        except Exception:
+            if hasattr(st, "experimental_rerun"):
+                st.experimental_rerun()
 
-    # ---------- Receitas ----------
-    with tab[0]:
+    def _money(x):
+        try:
+            return money(x)
+        except Exception:
+            try:
+                v = float(x or 0)
+            except Exception:
+                v = 0.0
+            s = f"R$ {v:,.2f}"
+            # formata pt-BR
+            return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+    def _has_yield_unit_col() -> bool:
+        r = qone("""
+            select exists (
+                select 1 from information_schema.columns
+                 where table_schema='resto' and table_name='recipe' and column_name='yield_unit_id'
+            ) as ok;
+        """)
+        return bool(r and r.get("ok"))
+
+    def _recipe_cost(product_id: int):
+        """Calcula custo estimado pelo last_cost dos ingredientes + overhead + perdas.
+           Retorna dict {'unit_cost': float, 'batch_cost': float, 'yield_qty': float, 'yield_unit': 'abbr' ou None}
+           ou None se não houver ficha técnica/ingredientes."""
+        recipe = qone("select * from resto.recipe where product_id=%s;", (product_id,))
+        if not recipe:
+            return None
+
+        items = qall("""
+            select ri.qty, coalesce(ri.conversion_factor,1) as conv, coalesce(p.last_cost,0) as last_cost
+              from resto.recipe_item ri
+              join resto.product p on p.id = ri.ingredient_id
+             where ri.recipe_id=%s;
+        """, (recipe["id"],)) or []
+
+        if not items:
+            return None
+
+        tot_ing = 0.0
+        for it in items:
+            try:
+                tot_ing += float(it["qty"]) * float(it["conv"]) * float(it["last_cost"])
+            except Exception:
+                pass
+
+        overhead = float(recipe.get("overhead_pct") or 0.0) / 100.0
+        loss     = float(recipe.get("loss_pct") or 0.0) / 100.0
+        yq       = float(recipe.get("yield_qty") or 0.0)
+        if yq <= 0:
+            return None
+
+        batch = tot_ing * (1 + overhead) * (1 + loss)
+        unit  = batch / yq if yq > 0 else 0.0
+
+        yabbr = None
+        if _has_yield_unit_col():
+            yu = recipe.get("yield_unit_id")
+            if yu:
+                r = qone("select abbr from resto.unit where id=%s;", (yu,))
+                yabbr = r["abbr"] if r else None
+
+        return {"unit_cost": unit, "batch_cost": batch, "yield_qty": yq, "yield_unit": yabbr}
+
+    header("💲 Precificação", "Simule preços e margens a partir da ficha técnica (ou último custo).")
+    tabs = st.tabs(["🧮 Simulador", "📊 Tabela de preços"])
+
+    # Carrega produtos base
+    prods = qall("select id, name, unit, category, last_cost, active from resto.product order by name;") or []
+    if not prods:
+        st.warning("Cadastre produtos em **Estoque → Cadastro** antes.")
+        return
+
+    # ==================== Aba: Simulador ====================
+    with tabs[0]:
         card_start()
-        st.subheader("Ficha técnica do produto")
-        prod = st.selectbox("Produto final *", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-        if prod:
-            recipe = qone("select * from resto.recipe where product_id=%s;", (prod[0],))
-            if not recipe:
-                st.info("Sem receita ainda. Preencha para criar.")
-                with st.form("form_new_recipe"):
-                    yield_qty = st.number_input("Rendimento (quantidade)", 0.0, 1_000_000.0, 10.0, 0.1)
-                    yield_unit = st.selectbox("Unidade do rendimento", options=[(u['id'], u['abbr']) for u in units], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-                    overhead = st.number_input("Custo indireto % (gás/energia/mão de obra)", 0.0, 999.0, 0.0, 0.1)
-                    loss = st.number_input("Perdas %", 0.0, 100.0, 0.0, 0.1)
-                    ok = st.form_submit_button("Criar ficha técnica")
-                if ok:
-                    qexec("insert into resto.recipe(product_id, yield_qty, yield_unit_id, overhead_pct, loss_pct) values (%s,%s,%s,%s,%s);", (prod[0], yield_qty, yield_unit[0], overhead, loss))
-                    st.success("Ficha criada!")
-                    recipe = qone("select * from resto.recipe where product_id=%s;", (prod[0],))
+        st.subheader("Simulador de preço por produto")
 
-            if recipe:
-                st.caption(f"Rende {recipe['yield_qty']} {qone('select abbr from resto.unit where id=%s;', (recipe['yield_unit_id'],))['abbr']} | Indiretos: {recipe['overhead_pct']}% | Perdas: {recipe['loss_pct']}% ")
-                with st.expander("Adicionar ingrediente"):
-                    ing = st.selectbox("Ingrediente", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="ing_sel")
-                    qty = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1, key="ing_qty")
-                    unit = st.selectbox("Unidade", options=[(u['id'], u['abbr']) for u in units], format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="ing_unit")
-                    conv = st.number_input("Fator de conversão (opcional)", 0.0, 1_000_000.0, 1.0, 0.01, help="Ex: 1 colher = 15 ml → use 15 se seu estoque estiver em ml.")
-                    add = st.button("Adicionar ingrediente", key="ing_add")
-                    if add and ing and qty>0:
-                        qexec("insert into resto.recipe_item(recipe_id, ingredient_id, qty, unit_id, conversion_factor) values (%s,%s,%s,%s,%s);", (recipe['id'], ing[0], qty, unit[0], conv))
-                        st.success("Ingrediente incluído!")
+        prod = st.selectbox(
+            "Produto",
+            options=[(p["id"], p["name"]) for p in prods],
+            format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+            key="prec_prod"
+        )
+        if not prod:
+            card_end()
+            return
 
-                items = qall("""
-                    select ri.id, p.name as ingrediente, ri.qty, u.abbr
-                      from resto.recipe_item ri
-                      join resto.product p on p.id = ri.ingredient_id
-                      join resto.unit u on u.id = ri.unit_id
-                     where ri.recipe_id=%s
-                     order by p.name;
-                """, (recipe['id'],))
-                st.dataframe(pd.DataFrame(items), use_container_width=True, hide_index=True)
+        pid = int(prod[0])
+        prow = next((r for r in prods if r["id"] == pid), None) or {}
+        est = _recipe_cost(pid)
 
-                # custo estimado (view)
-                cost = qone("select * from resto.v_recipe_cost where product_id=%s;", (prod[0],))
-                if cost:
-                    st.markdown(f"**Custo do lote:** {money(cost['batch_cost'])} • **Custo unitário estimado:** {money(cost['unit_cost_estimated'])}")
-                else:
-                    st.caption("Adicione ingredientes para ver o custo.")
+        base_cost = None
+        base_label = ""
+        if est:
+            base_cost = float(est["unit_cost"])
+            ytxt = f"{est['yield_qty']:.3f} {est['yield_unit']}" if est.get("yield_unit") else f"{est['yield_qty']:.3f}"
+            st.caption(f"Cálculo por ficha técnica • Rendimento: {ytxt} • Custo do lote: {_money(est['batch_cost'])}")
+            base_label = "Custo unitário estimado (ficha técnica)"
+        else:
+            base_cost = float(prow.get("last_cost") or 0.0)
+            base_label = "Custo base (last_cost do produto)"
+            st.caption("Sem ficha técnica com ingredientes → usando last_cost do produto.")
+
+        st.markdown(f"**{base_label}:** {_money(base_cost)}")
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            markup = st.number_input("Markup %", 0.0, 1000.0, 200.0, 0.1, format="%.2f")
+        with c2:
+            taxa = st.number_input("Taxas/Cartão %", 0.0, 30.0, 0.0, 0.1, format="%.2f")
+        with c3:
+            imp = st.number_input("Impostos %", 0.0, 50.0, 8.0, 0.1, format="%.2f",
+                                  help="Estimativa de tributos sobre venda (ex.: Simples/ISS/PIS/COFINS).")
+        with c4:
+            desc = st.number_input("Desconto médio %", 0.0, 100.0, 0.0, 0.1, format="%.2f")
+
+        preco_sugerido = base_cost * (1 + markup/100.0)
+        receita_liq = preco_sugerido * (1 - desc/100.0) * (1 - taxa/100.0) * (1 - imp/100.0)
+        margem_bruta = (receita_liq - base_cost) / preco_sugerido * 100 if preco_sugerido else 0.0
+
+        st.markdown(
+            f"**Preço sugerido:** {_money(preco_sugerido)}  \n"
+            f"**Receita líquida estimada:** {_money(receita_liq)}  \n"
+            f"**Margem bruta sobre preço sugerido:** {margem_bruta:.2f}%"
+        )
         card_end()
 
-    # ---------- Precificação ----------
-    with tab[1]:
+    # ==================== Aba: Tabela de preços ====================
+    with tabs[1]:
         card_start()
-        st.subheader("Simulador de Preço de Venda")
-        prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="prec_prod")
-        if prod:
-            rec = qone("select unit_cost_estimated from resto.v_recipe_cost where product_id=%s;", (prod[0],))
-            avg = qone("select avg_cost from resto.product where id=%s;", (prod[0],))
-            base_cost = rec['unit_cost_estimated'] if rec and rec['unit_cost_estimated'] else (avg['avg_cost'] if avg else 0.0)
-            st.markdown(f"**Custo base (estimado ou CMP):** {money(base_cost)}")
+        st.subheader("Tabela de preços (em massa)")
 
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                markup = st.number_input("Markup %", 0.0, 1000.0, 200.0, 0.1)
-            with col2:
-                taxa_cartao = st.number_input("Taxas/Cartão %", 0.0, 30.0, 0.0, 0.1)
-            with col3:
-                impostos = st.number_input("Impostos s/ venda %", 0.0, 50.0, 8.0, 0.1, help="Estimativa Simples Nacional/ISS/PIS/COFINS.")
-            with col4:
-                desconto = st.number_input("Desconto médio %", 0.0, 100.0, 0.0, 0.1)
+        f1, f2, f3 = st.columns([2,1,1])
+        with f1:
+            f_cat = st.text_input("Filtrar por categoria (texto exato opcional)", key="prec_tab_cat")
+        with f2:
+            f_only_active = st.checkbox("Somente ativos", value=True, key="prec_tab_active")
+        with f3:
+            base_markup = st.number_input("Markup base %", 0.0, 1000.0, 200.0, 0.1, key="prec_tab_markup", format="%.2f")
 
-            preco_sugerido = base_cost * (1 + (markup/100.0))
-            preco_liquido = preco_sugerido * (1 - desconto/100.0) * (1 - taxa_cartao/100.0) * (1 - impostos/100.0)
+        f4, f5 = st.columns(2)
+        with f4:
+            base_taxa = st.number_input("Taxas/Cartão %", 0.0, 30.0, 0.0, 0.1, key="prec_tab_taxa", format="%.2f")
+        with f5:
+            base_imp = st.number_input("Impostos %", 0.0, 50.0, 8.0, 0.1, key="prec_tab_imp", format="%.2f")
 
-            st.markdown(f"**Preço sugerido:** {money(preco_sugerido)} • **Receita líquida estimada:** {money(preco_liquido)}")
+        # Monta dataframe
+        rows = []
+        for p in prods:
+            if f_only_active and not p.get("active"):
+                continue
+            if f_cat.strip() and (str(p.get("category") or "") != f_cat.strip()):
+                continue
+
+            est = _recipe_cost(p["id"])
+            if est:
+                base_cost = float(est["unit_cost"])
+            else:
+                base_cost = float(p.get("last_cost") or 0.0)
+
+            ps = base_cost * (1 + base_markup/100.0)
+            rl = ps * (1 - base_taxa/100.0) * (1 - base_imp/100.0)
+            mg = (rl - base_cost) / ps * 100 if ps else 0.0
+
+            rows.append({
+                "Produto": p["name"],
+                "Categoria": p.get("category") or "",
+                "Un": p.get("unit") or "",
+                "Custo base": base_cost,
+                "Preço sugerido": ps,
+                "Margem bruta %": mg
+            })
+
+        df = pd.DataFrame(rows)
+        if df.empty:
+            st.caption("Nenhum produto para os filtros.")
+            card_end()
+            return
+
+        # Exibição amigável
+        df_show = df.copy()
+        df_show["Custo base"] = df_show["Custo base"].map(_money)
+        df_show["Preço sugerido"] = df_show["Preço sugerido"].map(_money)
+        df_show["Margem bruta %"] = df_show["Margem bruta %"].map(lambda x: f"{x:.2f}%")
+
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
         card_end()
 
 # ===================== PRODUÇÃO =====================
