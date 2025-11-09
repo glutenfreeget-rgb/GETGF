@@ -602,74 +602,165 @@ def page_cadastros():
 
 #==========================================================COMPRAS===========================================================================
 def page_compras():
+    import pandas as pd
+    from datetime import date
+
+    # helper seguro para rerun
+    def _rerun():
+        try:
+            st.rerun()
+        except Exception:
+            if hasattr(st, "experimental_rerun"):
+                st.experimental_rerun()
+
     header("📥 Compras", "Lançar notas e lotes com validade.")
-    suppliers = qall("select id, name from resto.supplier order by name;")
-    prods = qall("select id, name, unit_id from resto.product order by name;")
-    units = qall("select id, abbr from resto.unit order by abbr;")
+
+    # carrega dados base
+    suppliers = qall("select id, name from resto.supplier order by name;") or []
+    prods     = qall("select id, name, unit_id from resto.product order by name;") or []
+    units     = qall("select id, abbr from resto.unit order by abbr;") or []
+
+    sup_opts  = [(s["id"], s["name"]) for s in suppliers]
+    prod_opts = [(p["id"], p["name"]) for p in prods]
+    unit_opts = [(u["id"], u["abbr"]) for u in units]
+
+    # estado da lista de itens
+    st.session_state.setdefault("compra_itens", [])
 
     card_start()
     with st.form("form_compra"):
-        supplier = st.selectbox("Fornecedor *", options=[(s['id'], s['name']) for s in suppliers], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+        supplier   = st.selectbox("Fornecedor *", options=sup_opts, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
         doc_number = st.text_input("Número do documento")
-        cfop_ent = st.text_input("CFOP Entrada", value="1102")
-        doc_date = st.date_input("Data", value=date.today())
-        freight = st.number_input("Frete", 0.00, 9999999.99, 0.00, 0.01)
-        other = st.number_input("Outros custos", 0.00, 9999999.99, 0.00, 0.01)
+        cfop_ent   = st.text_input("CFOP Entrada", value="1102")
+        doc_date   = st.date_input("Data", value=date.today())
+        c1, c2 = st.columns(2)
+        with c1:
+            freight = st.number_input("Frete", 0.00, 9_999_999.99, 0.00, 0.01, format="%.2f")
+        with c2:
+            other   = st.number_input("Outros custos", 0.00, 9_999_999.99, 0.00, 0.01, format="%.2f")
 
         st.markdown("**Itens da compra (cada item é um LOTE)**")
-        if "compra_itens" not in st.session_state:
-            st.session_state["compra_itens"] = []
 
-        with st.expander("Adicionar item"):
-            prod = st.selectbox("Produto", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-            unit = st.selectbox("Unidade", options=[(u['id'], u['abbr']) for u in units], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-            qty = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1)
-            unit_price = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01)
-            discount = st.number_input("Desconto", 0.0, 1_000_000.0, 0.0, 0.01)
-            lote = st.text_input("Lote (opcional)")
-            expiry = st.date_input("Validade", value=None)
-            add = st.button("Adicionar à lista")
-            if add and prod and unit and qty>0:
-                total = (qty * unit_price) - discount
-                st.session_state["compra_itens"].append({
-                    "product_id": prod[0], "product_name": prod[1],
-                    "unit_id": unit[0], "unit_abbr": unit[1],
-                    "qty": qty, "unit_price": unit_price, "discount": discount,
-                    "total": total, "lot_number": lote or None, "expiry_date": str(expiry) if expiry else None
-                })
-                st.success("Item adicionado!")
+        # --- bloco "Adicionar item" (continua dentro do form!)
+        with st.expander("Adicionar item", expanded=False):
+            prod = st.selectbox("Produto", options=prod_opts, key="cmp_prod",
+                                format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+            unit = st.selectbox("Unidade", options=unit_opts, key="cmp_unit",
+                                format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+            qty  = st.number_input("Quantidade", min_value=0.001, step=0.001, value=1.000, key="cmp_qty", format="%.3f")
+            unit_price = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01, key="cmp_unit_price", format="%.2f")
+            discount   = st.number_input("Desconto", 0.0, 1_000_000.0, 0.0, 0.01, key="cmp_discount", format="%.2f")
 
-        df = pd.DataFrame(st.session_state["compra_itens"]) if st.session_state["compra_itens"] else pd.DataFrame(columns=["product_name","qty","unit_abbr","unit_price","discount","total","expiry_date"])
+            col_l1, col_l2 = st.columns(2)
+            with col_l1:
+                lote = st.text_input("Lote (opcional)", key="cmp_lote")
+            with col_l2:
+                has_exp = st.checkbox("Definir validade", value=False, key="cmp_has_exp")
+            expiry = st.date_input("Validade", value=date.today(), key="cmp_expiry") if has_exp else None
+
+        # snapshot para exibição antes dos botões
+        df = pd.DataFrame(st.session_state["compra_itens"]) if st.session_state["compra_itens"] else pd.DataFrame(
+            columns=["product_name", "qty", "unit_abbr", "unit_price", "discount", "total", "expiry_date"]
+        )
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-        total_doc = float(df["total"].sum()) if not df.empty else 0.0
-        st.markdown(f"**Total itens:** {money(total_doc)}")
+        total_itens = float(df["total"].sum()) if not df.empty else 0.0
+        total_doc   = total_itens + float(freight) + float(other)
+        st.markdown(
+            f"**Total itens:** {money(total_itens)}  \n"
+            f"**+ Frete:** {money(freight)}  \n"
+            f"**+ Outros:** {money(other)}  \n"
+            f"### **Total do documento:** {money(total_doc)}"
+        )
 
-        submit = st.form_submit_button("Lançar compra e atualizar estoque")
+        # três ações no MESMO form (todas como form_submit_button!)
+        bcol1, bcol2, bcol3 = st.columns([1, 1, 2])
+        add_item = bcol1.form_submit_button("➕ Adicionar item")
+        clear_it = bcol2.form_submit_button("🧹 Limpar itens")
+        submit   = bcol3.form_submit_button("💾 Lançar compra e atualizar estoque")
     card_end()
 
-    if submit and supplier and doc_date and df is not None:
-        pid = supplier[0]
-        row = qone("""
-            insert into resto.purchase(supplier_id, doc_number, cfop_entrada, doc_date, freight_value, other_costs, total, status)
+    # --- ações do form ---
+    if add_item:
+        if not prod or not unit:
+            st.warning("Selecione produto e unidade.")
+            return
+        if float(qty) <= 0:
+            st.warning("Quantidade deve ser maior que zero.")
+            return
+
+        line_total = max(float(qty) * float(unit_price) - float(discount), 0.0)
+        st.session_state["compra_itens"].append({
+            "product_id":  prod[0], "product_name": prod[1],
+            "unit_id":     unit[0], "unit_abbr": unit[1],
+            "qty":         float(qty),
+            "unit_price":  float(unit_price),
+            "discount":    float(discount),
+            "total":       float(line_total),
+            "lot_number":  (lote.strip() if isinstance(lote, str) and lote.strip() else None),
+            "expiry_date": (str(expiry) if expiry else None),
+        })
+        st.success("Item adicionado!")
+        _rerun()
+
+    if clear_it:
+        st.session_state["compra_itens"] = []
+        st.info("Lista de itens limpa.")
+        _rerun()
+
+    if submit:
+        # validações básicas
+        if not supplier:
+            st.error("Escolha um fornecedor.")
+            return
+        if not st.session_state["compra_itens"]:
+            st.error("Adicione pelo menos um item à compra.")
+            return
+
+        pid = int(supplier[0]) if isinstance(supplier, tuple) else int(supplier)
+
+        # total recalculado (server-side) para segurança
+        items_df = pd.DataFrame(st.session_state["compra_itens"])
+        total_itens = float(items_df["total"].sum()) if not items_df.empty else 0.0
+        total_doc   = total_itens + float(freight) + float(other)
+
+        # cabeçalho da compra
+        prow = qone("""
+            insert into resto.purchase
+                (supplier_id, doc_number, cfop_entrada, doc_date, freight_value, other_costs, total, status)
             values (%s,%s,%s,%s,%s,%s,%s,'LANÇADA')
             returning id;
-        """, (pid, doc_number, cfop_ent, doc_date, freight, other, total_doc))
-        purchase_id = row["id"]
+        """, (pid, doc_number or None, cfop_ent or None, doc_date, float(freight), float(other), float(total_doc)))
+        purchase_id = prow["id"]
+
+        # itens (cada item é um LOTE)
         for it in st.session_state["compra_itens"]:
             rowi = qone("""
                 insert into resto.purchase_item(
                   purchase_id, product_id, qty, unit_id, unit_price, discount, total, lot_number, expiry_date
                 ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 returning id;
-            """, (purchase_id, it["product_id"], it["qty"], it["unit_id"], it["unit_price"], it["discount"], it["total"], it["lot_number"], it["expiry_date"]))
+            """, (purchase_id, int(it["product_id"]), float(it["qty"]), int(it["unit_id"]),
+                  float(it["unit_price"]), float(it["discount"]), float(it["total"]),
+                  it["lot_number"], it["expiry_date"]))
             lot_id = rowi["id"]
-            # registra movimento IN por lote
-            note = f"lote:{lot_id}" + (f";exp:{it['expiry_date']}" if it["expiry_date"] else "")
-            qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'purchase',%s,%s);", (it["product_id"], it["qty"], it["unit_price"], lot_id, note))
 
+            # registra movimento de ENTRADA
+            note = f"purchase:{purchase_id};lote:{lot_id}" + (f";exp:{it['expiry_date']}" if it["expiry_date"] else "")
+            qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'purchase',%s,%s);",
+                  (int(it["product_id"]), float(it["qty"]), float(it["unit_price"]), lot_id, note))
+
+            # opcional: atualizar last_cost do produto
+            try:
+                qexec("update resto.product set last_cost=%s where id=%s;", (float(it["unit_price"]), int(it["product_id"])))
+            except Exception:
+                pass
+
+        # limpa lista e confirma
         st.session_state["compra_itens"] = []
         st.success(f"Compra #{purchase_id} lançada e estoque atualizado!")
+        _rerun()
+
 
 def page_vendas():
     header("🧾 Vendas (simples)", "Registre saídas e gere CMV.")
