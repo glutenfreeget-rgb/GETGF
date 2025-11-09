@@ -605,7 +605,7 @@ def page_compras():
     import pandas as pd
     from datetime import date
 
-    # helper seguro para rerun
+    # ---- helpers ----
     def _rerun():
         try:
             st.rerun()
@@ -613,155 +613,419 @@ def page_compras():
             if hasattr(st, "experimental_rerun"):
                 st.experimental_rerun()
 
-    header("📥 Compras", "Lançar notas e lotes com validade.")
+    def _lot_consumed_qty(lot_id: int) -> float:
+        """Quantidade já consumida do lote (OUT). Considera reference_id == lot_id e note com 'lot:<id>'."""
+        r = qone("""
+            with outs as (
+                select coalesce(sum(qty),0) s
+                  from resto.inventory_movement
+                 where kind='OUT'
+                   and (reference_id = %s
+                        or note ilike %s
+                        or note ilike %s)
+            )
+            select s from outs;
+        """, (int(lot_id), f"lot:{int(lot_id)}%", f"%;lot:{int(lot_id)}%"))
+        return float((r or {}).get("s") or 0.0)
 
-    # carrega dados base
-    suppliers = qall("select id, name from resto.supplier order by name;") or []
-    prods     = qall("select id, name, unit_id from resto.product order by name;") or []
-    units     = qall("select id, abbr from resto.unit order by abbr;") or []
+    def _recalc_purchase_total(purchase_id: int):
+        r = qone("""
+            select coalesce(sum(total),0) as it_sum
+              from resto.purchase_item
+             where purchase_id=%s;
+        """, (purchase_id,))
+        it_sum = float(r["it_sum"] if r else 0.0)
+        r2 = qone("select coalesce(freight_value,0) f, coalesce(other_costs,0) o from resto.purchase where id=%s;", (purchase_id,))
+        f = float((r2 or {}).get("f") or 0.0)
+        o = float((r2 or {}).get("o") or 0.0)
+        qexec("update resto.purchase set total=%s where id=%s;", (it_sum + f + o, purchase_id))
 
-    sup_opts  = [(s["id"], s["name"]) for s in suppliers]
-    prod_opts = [(p["id"], p["name"]) for p in prods]
-    unit_opts = [(u["id"], u["abbr"]) for u in units]
+    header("📥 Compras", "Lançar notas e gerenciar itens/lotes.")
+    tabs = st.tabs(["➕ Nova compra", "🗂️ Notas lançadas"])
 
-    # estado da lista de itens
-    st.session_state.setdefault("compra_itens", [])
+    # ============== Aba 1: Nova compra (como antes, com pequenos ajustes) ==============
+    with tabs[0]:
+        # carrega dados base
+        suppliers = qall("select id, name from resto.supplier order by name;") or []
+        prods     = qall("select id, name, unit_id from resto.product order by name;") or []
+        units     = qall("select id, abbr from resto.unit order by abbr;") or []
 
-    card_start()
-    with st.form("form_compra"):
-        supplier   = st.selectbox("Fornecedor *", options=sup_opts, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-        doc_number = st.text_input("Número do documento")
-        cfop_ent   = st.text_input("CFOP Entrada", value="1102")
-        doc_date   = st.date_input("Data", value=date.today())
-        c1, c2 = st.columns(2)
-        with c1:
-            freight = st.number_input("Frete", 0.00, 9_999_999.99, 0.00, 0.01, format="%.2f")
-        with c2:
-            other   = st.number_input("Outros custos", 0.00, 9_999_999.99, 0.00, 0.01, format="%.2f")
+        sup_opts  = [(s["id"], s["name"]) for s in suppliers]
+        prod_opts = [(p["id"], p["name"]) for p in prods]
+        unit_opts = [(u["id"], u["abbr"]) for u in units]
 
-        st.markdown("**Itens da compra (cada item é um LOTE)**")
+        st.session_state.setdefault("compra_itens", [])
 
-        # --- bloco "Adicionar item" (continua dentro do form!)
-        with st.expander("Adicionar item", expanded=False):
-            prod = st.selectbox("Produto", options=prod_opts, key="cmp_prod",
-                                format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-            unit = st.selectbox("Unidade", options=unit_opts, key="cmp_unit",
-                                format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-            qty  = st.number_input("Quantidade", min_value=0.001, step=0.001, value=1.000, key="cmp_qty", format="%.3f")
-            unit_price = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01, key="cmp_unit_price", format="%.2f")
-            discount   = st.number_input("Desconto", 0.0, 1_000_000.0, 0.0, 0.01, key="cmp_discount", format="%.2f")
+        card_start()
+        with st.form("form_compra"):
+            supplier   = st.selectbox("Fornecedor *", options=sup_opts, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+            doc_number = st.text_input("Número do documento")
+            cfop_ent   = st.text_input("CFOP Entrada", value="1102")
+            doc_date   = st.date_input("Data", value=date.today())
+            c1, c2 = st.columns(2)
+            with c1:
+                freight = st.number_input("Frete", 0.00, 9_999_999.99, 0.00, 0.01, format="%.2f")
+            with c2:
+                other   = st.number_input("Outros custos", 0.00, 9_999_999.99, 0.00, 0.01, format="%.2f")
 
-            col_l1, col_l2 = st.columns(2)
-            with col_l1:
-                lote = st.text_input("Lote (opcional)", key="cmp_lote")
-            with col_l2:
-                has_exp = st.checkbox("Definir validade", value=False, key="cmp_has_exp")
-            expiry = st.date_input("Validade", value=date.today(), key="cmp_expiry") if has_exp else None
+            st.markdown("**Itens da compra (cada item é um LOTE)**")
+            with st.expander("Adicionar item", expanded=False):
+                prod = st.selectbox("Produto", options=prod_opts, key="cmp_prod",
+                                    format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+                unit = st.selectbox("Unidade", options=unit_opts, key="cmp_unit",
+                                    format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+                qty  = st.number_input("Quantidade", min_value=0.001, step=0.001, value=1.000, key="cmp_qty", format="%.3f")
+                unit_price = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01, key="cmp_unit_price", format="%.2f")
+                discount   = st.number_input("Desconto", 0.0, 1_000_000.0, 0.0, 0.01, key="cmp_discount", format="%.2f")
 
-        # snapshot para exibição antes dos botões
-        df = pd.DataFrame(st.session_state["compra_itens"]) if st.session_state["compra_itens"] else pd.DataFrame(
-            columns=["product_name", "qty", "unit_abbr", "unit_price", "discount", "total", "expiry_date"]
-        )
-        st.dataframe(df, use_container_width=True, hide_index=True)
+                col_l1, col_l2 = st.columns(2)
+                with col_l1:
+                    lote = st.text_input("Lote (opcional)", key="cmp_lote")
+                with col_l2:
+                    has_exp = st.checkbox("Definir validade", value=False, key="cmp_has_exp")
+                expiry = st.date_input("Validade", value=date.today(), key="cmp_expiry") if has_exp else None
 
-        total_itens = float(df["total"].sum()) if not df.empty else 0.0
-        total_doc   = total_itens + float(freight) + float(other)
-        st.markdown(
-            f"**Total itens:** {money(total_itens)}  \n"
-            f"**+ Frete:** {money(freight)}  \n"
-            f"**+ Outros:** {money(other)}  \n"
-            f"### **Total do documento:** {money(total_doc)}"
-        )
+            df = pd.DataFrame(st.session_state["compra_itens"]) if st.session_state["compra_itens"] else pd.DataFrame(
+                columns=["product_name", "qty", "unit_abbr", "unit_price", "discount", "total", "expiry_date"]
+            )
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # três ações no MESMO form (todas como form_submit_button!)
-        bcol1, bcol2, bcol3 = st.columns([1, 1, 2])
-        add_item = bcol1.form_submit_button("➕ Adicionar item")
-        clear_it = bcol2.form_submit_button("🧹 Limpar itens")
-        submit   = bcol3.form_submit_button("💾 Lançar compra e atualizar estoque")
-    card_end()
+            total_itens = float(df["total"].sum()) if not df.empty else 0.0
+            total_doc   = total_itens + float(freight) + float(other)
+            st.markdown(
+                f"**Total itens:** {money(total_itens)}  \n"
+                f"**+ Frete:** {money(freight)}  \n"
+                f"**+ Outros:** {money(other)}  \n"
+                f"### **Total do documento:** {money(total_doc)}"
+            )
 
-    # --- ações do form ---
-    if add_item:
-        if not prod or not unit:
-            st.warning("Selecione produto e unidade.")
-            return
-        if float(qty) <= 0:
-            st.warning("Quantidade deve ser maior que zero.")
-            return
+            bcol1, bcol2, bcol3 = st.columns([1, 1, 2])
+            add_item = bcol1.form_submit_button("➕ Adicionar item")
+            clear_it = bcol2.form_submit_button("🧹 Limpar itens")
+            submit   = bcol3.form_submit_button("💾 Lançar compra e atualizar estoque")
+        card_end()
 
-        line_total = max(float(qty) * float(unit_price) - float(discount), 0.0)
-        st.session_state["compra_itens"].append({
-            "product_id":  prod[0], "product_name": prod[1],
-            "unit_id":     unit[0], "unit_abbr": unit[1],
-            "qty":         float(qty),
-            "unit_price":  float(unit_price),
-            "discount":    float(discount),
-            "total":       float(line_total),
-            "lot_number":  (lote.strip() if isinstance(lote, str) and lote.strip() else None),
-            "expiry_date": (str(expiry) if expiry else None),
-        })
-        st.success("Item adicionado!")
-        _rerun()
+        if add_item:
+            if not prod or not unit:
+                st.warning("Selecione produto e unidade.")
+            elif float(qty) <= 0:
+                st.warning("Quantidade deve ser maior que zero.")
+            else:
+                line_total = max(float(qty) * float(unit_price) - float(discount), 0.0)
+                st.session_state["compra_itens"].append({
+                    "product_id":  prod[0], "product_name": prod[1],
+                    "unit_id":     unit[0], "unit_abbr": unit[1],
+                    "qty":         float(qty),
+                    "unit_price":  float(unit_price),
+                    "discount":    float(discount),
+                    "total":       float(line_total),
+                    "lot_number":  (lote.strip() if isinstance(lote, str) and lote.strip() else None),
+                    "expiry_date": (str(expiry) if expiry else None),
+                })
+                st.success("Item adicionado!")
+                _rerun()
 
-    if clear_it:
-        st.session_state["compra_itens"] = []
-        st.info("Lista de itens limpa.")
-        _rerun()
+        if clear_it:
+            st.session_state["compra_itens"] = []
+            st.info("Lista de itens limpa.")
+            _rerun()
 
-    if submit:
-        # validações básicas
-        if not supplier:
-            st.error("Escolha um fornecedor.")
-            return
-        if not st.session_state["compra_itens"]:
-            st.error("Adicione pelo menos um item à compra.")
-            return
+        if submit:
+            if not supplier:
+                st.error("Escolha um fornecedor.")
+                return
+            if not st.session_state["compra_itens"]:
+                st.error("Adicione pelo menos um item à compra.")
+                return
 
-        pid = int(supplier[0]) if isinstance(supplier, tuple) else int(supplier)
+            pid = int(supplier[0]) if isinstance(supplier, tuple) else int(supplier)
 
-        # total recalculado (server-side) para segurança
-        items_df = pd.DataFrame(st.session_state["compra_itens"])
-        total_itens = float(items_df["total"].sum()) if not items_df.empty else 0.0
-        total_doc   = total_itens + float(freight) + float(other)
+            items_df = pd.DataFrame(st.session_state["compra_itens"])
+            total_itens = float(items_df["total"].sum()) if not items_df.empty else 0.0
+            total_doc   = total_itens + float(freight) + float(other)
 
-        # cabeçalho da compra
-        prow = qone("""
-            insert into resto.purchase
-                (supplier_id, doc_number, cfop_entrada, doc_date, freight_value, other_costs, total, status)
-            values (%s,%s,%s,%s,%s,%s,%s,'LANÇADA')
-            returning id;
-        """, (pid, doc_number or None, cfop_ent or None, doc_date, float(freight), float(other), float(total_doc)))
-        purchase_id = prow["id"]
-
-        # itens (cada item é um LOTE)
-        for it in st.session_state["compra_itens"]:
-            rowi = qone("""
-                insert into resto.purchase_item(
-                  purchase_id, product_id, qty, unit_id, unit_price, discount, total, lot_number, expiry_date
-                ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            prow = qone("""
+                insert into resto.purchase
+                    (supplier_id, doc_number, cfop_entrada, doc_date, freight_value, other_costs, total, status)
+                values (%s,%s,%s,%s,%s,%s,%s,'LANÇADA')
                 returning id;
-            """, (purchase_id, int(it["product_id"]), float(it["qty"]), int(it["unit_id"]),
-                  float(it["unit_price"]), float(it["discount"]), float(it["total"]),
-                  it["lot_number"], it["expiry_date"]))
-            lot_id = rowi["id"]
+            """, (pid, doc_number or None, cfop_ent or None, doc_date, float(freight), float(other), float(total_doc)))
+            purchase_id = prow["id"]
 
-            # registra movimento de ENTRADA
-            note = f"purchase:{purchase_id};lote:{lot_id}" + (f";exp:{it['expiry_date']}" if it["expiry_date"] else "")
-            qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'purchase',%s,%s);",
-                  (int(it["product_id"]), float(it["qty"]), float(it["unit_price"]), lot_id, note))
+            for it in st.session_state["compra_itens"]:
+                rowi = qone("""
+                    insert into resto.purchase_item(
+                      purchase_id, product_id, qty, unit_id, unit_price, discount, total, lot_number, expiry_date
+                    ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    returning id;
+                """, (purchase_id, int(it["product_id"]), float(it["qty"]), int(it["unit_id"]),
+                      float(it["unit_price"]), float(it["discount"]), float(it["total"]),
+                      it["lot_number"], it["expiry_date"]))
+                lot_id = rowi["id"]
 
-            # opcional: atualizar last_cost do produto
-            try:
-                qexec("update resto.product set last_cost=%s where id=%s;", (float(it["unit_price"]), int(it["product_id"])))
-            except Exception:
-                pass
+                note = f"purchase:{purchase_id};lot:{lot_id}" + (f";exp:{it['expiry_date']}" if it["expiry_date"] else "")
+                qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'purchase',%s,%s);",
+                      (int(it["product_id"]), float(it["qty"]), float(it["unit_price"]), lot_id, note))
 
-        # limpa lista e confirma
-        st.session_state["compra_itens"] = []
-        st.success(f"Compra #{purchase_id} lançada e estoque atualizado!")
-        _rerun()
+                # atualiza last_cost do produto
+                try:
+                    qexec("update resto.product set last_cost=%s where id=%s;", (float(it["unit_price"]), int(it["product_id"])))
+                except Exception:
+                    pass
+
+            st.session_state["compra_itens"] = []
+            st.success(f"Compra #{purchase_id} lançada e estoque atualizado!")
+            _rerun()
+
+    # ============== Aba 2: Notas lançadas (edição/estorno/exclusão) ==============
+    with tabs[1]:
+        card_start()
+        st.subheader("Pesquisar notas")
+
+        # filtros
+        colf1, colf2 = st.columns(2)
+        with colf1:
+            dt_ini = st.date_input("De", value=date.today().replace(day=1), key="cmp_f_dtini")
+        with colf2:
+            dt_fim = st.date_input("Até", value=date.today(), key="cmp_f_dtfim")
+
+        suppliers = qall("select id, name from resto.supplier order by name;") or []
+        sup_opts  = [(0,"— todos —")] + [(s["id"], s["name"]) for s in suppliers]
+        colf3, colf4, colf5 = st.columns([2,1,1])
+        with colf3:
+            sup_sel = st.selectbox("Fornecedor", options=sup_opts, format_func=lambda x: x[1], key="cmp_f_sup")
+        with colf4:
+            status = st.selectbox("Status", ["— todos —","LANÇADA","ESTORNADA","CANCELADA"], key="cmp_f_status")
+        with colf5:
+            doc_q = st.text_input("Nº doc (contém)", key="cmp_f_doc")
+
+        wh = ["doc_date >= %s", "doc_date <= %s"]
+        pr = [dt_ini, dt_fim]
+        if sup_sel and sup_sel[0] != 0:
+            wh.append("supplier_id = %s"); pr.append(int(sup_sel[0]))
+        if status and status != "— todos —":
+            wh.append("status = %s"); pr.append(status)
+        if doc_q.strip():
+            wh.append("coalesce(doc_number,'') ilike %s"); pr.append(f"%{doc_q.strip()}%")
+
+        rows = qall(f"""
+            select p.id, p.doc_date, coalesce(p.doc_number,'') as doc_number,
+                   p.status, p.total, s.name as supplier
+              from resto.purchase p
+              left join resto.supplier s on s.id = p.supplier_id
+             where {' and '.join(wh)}
+             order by p.doc_date desc, p.id desc
+             limit 300;
+        """, tuple(pr)) or []
+        df = pd.DataFrame(rows)
+        if df.empty:
+            st.caption("Nenhuma nota encontrada para os filtros.")
+            card_end()
+            return
+
+        df_show = df.copy()
+        df_show["total"] = df_show["total"].map(lambda v: money(float(v or 0)))
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+        # selecionar nota para gerenciar
+        sel = st.selectbox(
+            "Escolha a nota para editar",
+            options=[(r["id"], f"#{r['id']} • {r['doc_date']} • {r['supplier']} • {r['doc_number']} • {r['status']}") for r in rows],
+            format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+            key="cmp_pick"
+        )
+        if not sel:
+            card_end()
+            return
+
+        purchase_id = int(sel[0])
+        header_row = qone("select * from resto.purchase where id=%s;", (purchase_id,))
+        items = qall("""
+            select i.id as lot_id, i.product_id, p.name as produto, i.qty, i.unit_id, u.abbr as un,
+                   i.unit_price, i.discount, i.total, i.lot_number, i.expiry_date
+              from resto.purchase_item i
+              join resto.product p on p.id = i.product_id
+              left join resto.unit u on u.id = i.unit_id
+             where i.purchase_id=%s
+             order by i.id;
+        """, (purchase_id,)) or []
+
+        st.divider()
+        st.subheader(f"Nota #{purchase_id} — cabeçalho")
+
+        with st.form(f"form_upd_header_{purchase_id}"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                up_doc = st.text_input("Número do documento", value=header_row.get("doc_number") or "")
+            with c2:
+                up_cfop = st.text_input("CFOP Entrada", value=header_row.get("cfop_entrada") or "")
+            with c3:
+                up_date = st.date_input("Data da nota", value=header_row.get("doc_date") or date.today())
+            c4, c5, c6 = st.columns(3)
+            with c4:
+                up_freight = st.number_input("Frete", 0.0, 9_999_999.99, float(header_row.get("freight_value") or 0.0), 0.01, format="%.2f")
+            with c5:
+                up_other   = st.number_input("Outros custos", 0.0, 9_999_999.99, float(header_row.get("other_costs") or 0.0), 0.01, format="%.2f")
+            with c6:
+                up_status = st.selectbox("Status", ["LANÇADA","ESTORNADA","CANCELADA"], index=["LANÇADA","ESTORNADA","CANCELADA"].index(header_row.get("status","LANÇADA")))
+            btn_upd_header = st.form_submit_button("💾 Atualizar cabeçalho")
+
+        if btn_upd_header:
+            qexec("""
+                update resto.purchase
+                   set doc_number=%s, cfop_entrada=%s, doc_date=%s,
+                       freight_value=%s, other_costs=%s, status=%s
+                 where id=%s;
+            """, (up_doc or None, up_cfop or None, up_date, float(up_freight), float(up_other), up_status, purchase_id))
+            _recalc_purchase_total(purchase_id)
+            st.success("Cabeçalho atualizado.")
+            _rerun()
+
+        st.subheader("Itens da nota (lotes)")
+        if not items:
+            st.caption("Sem itens.")
+        else:
+            df_i = pd.DataFrame(items)
+            df_i["Consumido"] = df_i["lot_id"].map(lambda x: _lot_consumed_qty(int(x)) > 0)
+            df_i["Excluir?"] = False
+
+            # editor (só permite editar quando NÃO consumido)
+            cfg = {
+                "lot_id":      st.column_config.NumberColumn("Lote", disabled=True),
+                "produto":     st.column_config.TextColumn("Produto", disabled=True),
+                "qty":         st.column_config.NumberColumn("Qtd", step=0.001, format="%.3f"),
+                "un":          st.column_config.TextColumn("Un", disabled=True),
+                "unit_price":  st.column_config.NumberColumn("Preço unit.", step=0.01, format="%.2f"),
+                "discount":    st.column_config.NumberColumn("Desconto", step=0.01, format="%.2f"),
+                "total":       st.column_config.NumberColumn("Total", step=0.01, format="%.2f", disabled=True),
+                "lot_number":  st.column_config.TextColumn("Lote"),
+                "expiry_date": st.column_config.DateColumn("Validade"),
+                "Consumido":   st.column_config.CheckboxColumn("Consumido", disabled=True),
+                "Excluir?":    st.column_config.CheckboxColumn("Excluir?", help="Só possível se não consumido"),
+            }
+
+            edited = st.data_editor(
+                df_i[["lot_id","produto","qty","un","unit_price","discount","total","lot_number","expiry_date","Consumido","Excluir?"]],
+                column_config=cfg,
+                hide_index=True,
+                num_rows="fixed",
+                key=f"cmp_items_editor_{purchase_id}",
+                use_container_width=True
+            )
+
+            colb1, colb2, colb3 = st.columns(3)
+            with colb1:
+                btn_save_items = st.button("💾 Salvar alterações dos itens")
+            with colb2:
+                btn_refresh = st.button("🔄 Atualizar")
+            with colb3:
+                btn_delete_note = st.button("🗑️ Excluir nota (se nenhum item consumido)")
+
+            if btn_refresh:
+                _rerun()
+
+            if btn_delete_note:
+                # Verifica consumo em todos os lotes
+                any_consumed = any(_lot_consumed_qty(int(r["lot_id"])) > 0 for r in items)
+                if any_consumed:
+                    st.error("Não é possível excluir: existe item já consumido.")
+                else:
+                    # remove movimentos IN, itens e a compra
+                    lot_ids = [int(r["lot_id"]) for r in items]
+                    try:
+                        if lot_ids:
+                            qexec("delete from resto.inventory_movement where reason='purchase' and kind='IN' and reference_id = any(%s);", (lot_ids,))
+                        qexec("delete from resto.purchase_item where purchase_id=%s;", (purchase_id,))
+                        qexec("delete from resto.purchase where id=%s;", (purchase_id,))
+                        st.success("Nota excluída com sucesso.")
+                        _rerun()
+                    except Exception:
+                        st.error("Falha ao excluir a nota.")
+
+            if btn_save_items:
+                # aplica exclusões e edições (onde permitido)
+                base = df_i.set_index("lot_id")
+                new  = edited.set_index("lot_id")
+                upd = delc = err = 0
+
+                # 1) exclusões primeiro
+                to_delete = [int(i) for i in new.index if bool(new.loc[i, "Excluir?"]) is True]
+                for lot_id in to_delete:
+                    if _lot_consumed_qty(lot_id) > 0:
+                        err += 1
+                        continue
+                    try:
+                        qexec("delete from resto.inventory_movement where reason='purchase' and kind='IN' and reference_id=%s;", (lot_id,))
+                        qexec("delete from resto.purchase_item where id=%s;", (lot_id,))
+                        delc += 1
+                    except Exception:
+                        err += 1
+
+                # 2) updates nos restantes (não consumidos)
+                keep_ids = [int(i) for i in new.index if int(i) not in to_delete]
+                for lot_id in keep_ids:
+                    if _lot_consumed_qty(lot_id) > 0:
+                        continue  # bloqueado
+                    a = base.loc[lot_id]
+                    b = new.loc[lot_id]
+
+                    changed = any([
+                        str(a.get("qty","")) != str(b.get("qty","")),
+                        str(a.get("unit_price","")) != str(b.get("unit_price","")),
+                        str(a.get("discount","")) != str(b.get("discount","")),
+                        str(a.get("lot_number","")) != str(b.get("lot_number","")),
+                        str(a.get("expiry_date","")) != str(b.get("expiry_date","")),
+                    ])
+                    if not changed:
+                        continue
+
+                    # Recalcula total do item
+                    try:
+                        new_qty   = float(b.get("qty") or 0)
+                        new_price = float(b.get("unit_price") or 0)
+                        new_disc  = float(b.get("discount") or 0)
+                        new_total = max(new_qty * new_price - new_disc, 0.0)
+                    except Exception:
+                        err += 1
+                        continue
+
+                    try:
+                        # atualiza compra_item
+                        qexec("""
+                            update resto.purchase_item
+                               set qty=%s, unit_price=%s, discount=%s, total=%s, lot_number=%s, expiry_date=%s
+                             where id=%s;
+                        """, (new_qty, new_price, new_disc, new_total,
+                              (b.get("lot_number") or None),
+                              (str(b.get("expiry_date")) if b.get("expiry_date") else None),
+                              lot_id))
+                        # atualiza movimento IN (remove e insere de novo)
+                        qexec("delete from resto.inventory_movement where reason='purchase' and kind='IN' and reference_id=%s;", (lot_id,))
+                        # pega product_id do item
+                        prow = qone("select product_id from resto.purchase_item where id=%s;", (lot_id,))
+                        pid  = int(prow["product_id"])
+                        note = f"purchase:{purchase_id};lot:{lot_id}" + (f";exp:{str(b.get('expiry_date'))}" if b.get("expiry_date") else "")
+                        qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'purchase',%s,%s);",
+                              (pid, new_qty, new_price, lot_id, note))
+
+                        # last_cost
+                        try:
+                            qexec("update resto.product set last_cost=%s where id=%s;", (new_price, pid))
+                        except Exception:
+                            pass
+
+                        upd += 1
+                    except Exception:
+                        err += 1
+
+                _recalc_purchase_total(purchase_id)
+                st.success(f"Itens: ✅ {upd} atualizado(s) • 🗑️ {delc} excluído(s) • ⚠️ {err} com erro(s).")
+                _rerun()
+
+        card_end()
 
 
+#=====================================VENDAS =================================================================================
 def page_vendas():
     header("🧾 Vendas (simples)", "Registre saídas e gere CMV.")
     prods = qall("select id, name from resto.product where is_sale_item order by name;")
