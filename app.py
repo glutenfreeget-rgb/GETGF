@@ -738,9 +738,11 @@ def page_estoque():
             st.caption("Nenhum lote dentro do período selecionado.")
         card_end()
 
+
+# ===================== FINANCEIRO =====================
 def page_financeiro():
     header("💰 Financeiro", "Entradas, Saídas e DRE.")
-    tabs = st.tabs(["💸 Entradas", "💳 Saídas", "📈 DRE", "⚙️ Gestão"])
+    tabs = st.tabs(["💸 Entradas", "💳 Saídas", "📈 DRE", "⚙️ Gestão", "📊 Painel"])
 
     METHODS = ['— todas —', 'dinheiro', 'pix', 'cartão débito', 'cartão crédito', 'boleto', 'transferência', 'outro']
 
@@ -1028,6 +1030,80 @@ def page_financeiro():
             _rerun()
 
         card_end()
+
+    # ---------- Aba: 📊 Painel ----------
+    with tabs[4]:
+        card_start()
+        st.subheader("📊 Painel por Categoria")
+
+        # Filtros (data + categorias múltiplas)
+        colp1, colp2 = st.columns(2)
+        with colp1:
+            p_dtini = st.date_input("De", value=date.today().replace(day=1), key="painel_dtini")
+        with colp2:
+            p_dtfim = st.date_input("Até", value=date.today(), key="painel_dtfim")
+
+        cats_all = qall("select id, name from resto.cash_category order by name;") or []
+        cat_opts = [(c["id"], c["name"]) for c in cats_all]
+        p_cats = st.multiselect(
+            "Categorias (opcional)",
+            options=cat_opts,
+            format_func=lambda x: x[1],
+            key="painel_cats"
+        )
+        sel_ids = [c[0] for c in p_cats] if p_cats else []
+
+        # Query agregada por categoria
+        wh = ["cb.entry_date >= %s", "cb.entry_date <= %s"]
+        pr = [p_dtini, p_dtfim]
+        if sel_ids:
+            wh.append("cb.category_id = ANY(%s)")
+            pr.append(sel_ids)
+
+        sqlp = f"""
+            select
+                coalesce(c.name, '(sem categoria)') as categoria,
+                sum(case when cb.kind='IN'  then cb.amount else 0 end)  as entradas_raw,
+                sum(case when cb.kind='OUT' then cb.amount else 0 end)  as saidas_raw
+            from resto.cashbook cb
+            left join resto.cash_category c on c.id = cb.category_id
+            where {' and '.join(wh)}
+            group by categoria
+            order by categoria;
+        """
+        rows_p = qall(sqlp, tuple(pr))
+        dfp = pd.DataFrame(rows_p or [])
+
+        if dfp.empty:
+            st.caption("Sem lançamentos no período/filtro.")
+            card_end()
+            return
+
+        # Normaliza: Saídas em valor positivo para visualização
+        dfp["entradas"] = dfp["entradas_raw"].astype(float)
+        dfp["saidas"]   = dfp["saidas_raw"].astype(float).apply(lambda x: -x if x < 0 else x)
+        dfp["saldo"]    = dfp["entradas"] - dfp["saidas"]
+
+        # KPIs
+        k1, k2, k3 = st.columns(3)
+        with k1: st.metric("Entradas (período)",  money(float(dfp["entradas"].sum())))
+        with k2: st.metric("Saídas (período)",    money(float(dfp["saidas"].sum())))
+        with k3: st.metric("Resultado (E − S)",   money(float(dfp["saldo"].sum())))
+
+        st.markdown("#### Por categoria")
+        df_show = dfp[["categoria","entradas","saidas","saldo"]].sort_values("saldo", ascending=False)
+        st.dataframe(df_show, use_container_width=True, hide_index=True)
+
+        # Gráfico de barras
+        chart_df = df_show.set_index("categoria")[["entradas","saidas"]]
+        st.bar_chart(chart_df, use_container_width=True)
+
+        # (opcional) Exportar CSV do painel
+        csv = df_show.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Exportar CSV (Painel)", data=csv, file_name="painel_financeiro.csv", mime="text/csv")
+
+        card_end()
+
 
 
 # ===================== Importar Extrato (CSV C6 / genérico) =====================
