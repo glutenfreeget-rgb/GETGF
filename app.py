@@ -742,7 +742,7 @@ def page_estoque():
 # ===================== FINANCEIRO =====================
 def page_financeiro():
     header("💰 Financeiro", "Entradas, Saídas e DRE.")
-    tabs = st.tabs(["💸 Entradas", "💳 Saídas", "📈 DRE", "⚙️ Gestão", "📊 Painel"])
+    tabs = st.tabs(["💸 Entradas", "💳 Saídas", "📈 DRE", "⚙️ Gestão", "📊 Painel", "📆 Comparativo"])
 
     METHODS = ['— todas —', 'dinheiro', 'pix', 'cartão débito', 'cartão crédito', 'boleto', 'transferência', 'outro']
 
@@ -1101,6 +1101,166 @@ def page_financeiro():
         # (opcional) Exportar CSV do painel
         csv = df_show.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Exportar CSV (Painel)", data=csv, file_name="painel_financeiro.csv", mime="text/csv")
+
+        card_end()
+        
+    # ---------- Aba: 📆 Comparativo ----------
+    with tabs[5]:
+        card_start()
+        st.subheader("📆 Comparativo (Mensal / Semestral / Anual)")
+
+        METHODS = ['— todas —', 'dinheiro', 'pix', 'cartão débito', 'cartão crédito', 'boleto', 'transferência', 'outro']
+
+        colc1, colc2, colc3 = st.columns([1, 1, 2])
+        with colc1:
+            modo = st.selectbox(
+                "Período",
+                ["Mensal (12m)", "Semestral (6m)", "Anual (5a)"],
+                key="cmp_modo"
+            )
+        with colc2:
+            method = st.selectbox("Método", METHODS, key="cmp_method")
+        with colc3:
+            cats_all = qall("select id, name from resto.cash_category order by name;") or []
+            cat_opts = [(c["id"], c["name"]) for c in cats_all]
+            cmp_cats = st.multiselect(
+                "Categorias (opcional)",
+                options=cat_opts,
+                format_func=lambda x: x[1],
+                key="cmp_cats"
+            )
+            cat_ids = [c[0] for c in cmp_cats] if cmp_cats else []
+
+        # ------------------------- Consultas -------------------------
+        if modo in ("Mensal (12m)", "Semestral (6m)"):
+            nmeses = 12 if "12" in modo else 6
+            # datas de início/fim
+            hoje = date.today().replace(day=1)
+            inicio = (hoje - timedelta(days=1)).replace(day=1)  # mês anterior base
+            # Volta (nmeses-1) meses a partir do mês atual
+            # Para evitar aritmética complicada de meses, deixamos pro SQL com generate_series
+
+            wh_extra = []
+            params = []
+            if cat_ids:
+                wh_extra.append("cb.category_id = ANY(%s)")
+                params.append(cat_ids)
+            if method and method != '— todas —':
+                wh_extra.append("cb.method = %s")
+                params.append(method)
+
+            sql_cmp = f"""
+                with series as (
+                    select generate_series(
+                        date_trunc('month', (current_date)) - interval '{nmeses-1} months',
+                        date_trunc('month', current_date),
+                        interval '1 month'
+                    )::date as m
+                ),
+                agg as (
+                    select date_trunc('month', cb.entry_date)::date as m,
+                           sum(case when cb.kind='IN'  then cb.amount else 0 end)  as vin,
+                           sum(case when cb.kind='OUT' then cb.amount else 0 end)  as vout
+                      from resto.cashbook cb
+                     where cb.entry_date >= (select min(m) from series)
+                       and cb.entry_date <  (date_trunc('month', current_date) + interval '1 month')
+                       {(' and ' + ' and '.join(wh_extra)) if wh_extra else ''}
+                  group by 1
+                )
+                select to_char(s.m, 'YYYY-MM') as periodo,
+                       coalesce(a.vin,0)  as entradas_raw,
+                       coalesce(a.vout,0) as saidas_raw
+                  from series s
+                  left join agg a on a.m = s.m
+              order by s.m;
+            """
+            rows_cmp = qall(sql_cmp, tuple(params)) or []
+            dfc = pd.DataFrame(rows_cmp)
+            if dfc.empty:
+                st.caption("Sem lançamentos no período/critério selecionado.")
+                card_end()
+                return
+
+            # Normaliza saídas como positivo para exibição e calcula saldo
+            dfc["entradas"] = dfc["entradas_raw"].astype(float)
+            dfc["saidas"]   = dfc["saidas_raw"].astype(float).apply(lambda x: -x if x < 0 else x)
+            dfc["saldo"]    = dfc["entradas"] - dfc["saidas"]
+
+            # KPIs
+            k1, k2, k3 = st.columns(3)
+            with k1: st.metric("Entradas", money(float(dfc["entradas"].sum())))
+            with k2: st.metric("Saídas",   money(float(dfc["saidas"].sum())))
+            with k3: st.metric("Saldo",    money(float(dfc["saldo"].sum())))
+
+            st.markdown("#### Evolução mensal")
+            show = dfc[["periodo","entradas","saidas","saldo"]]
+            st.dataframe(show, use_container_width=True, hide_index=True)
+            st.bar_chart(show.set_index("periodo")[["entradas","saidas"]], use_container_width=True)
+
+            csv = show.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Exportar CSV (Comparativo Mensal/Semestral)", data=csv,
+                               file_name="comparativo_mensal.csv", mime="text/csv")
+
+        else:
+            # Anual (últimos 5 anos, incluindo o atual)
+            wh_extra = []
+            params = []
+            if cat_ids:
+                wh_extra.append("cb.category_id = ANY(%s)")
+                params.append(cat_ids)
+            if method and method != '— todas —':
+                wh_extra.append("cb.method = %s")
+                params.append(method)
+
+            sql_cmp_y = f"""
+                with series as (
+                    select generate_series(
+                        date_trunc('year', current_date) - interval '4 years',
+                        date_trunc('year', current_date),
+                        interval '1 year'
+                    )::date as y
+                ),
+                agg as (
+                    select date_trunc('year', cb.entry_date)::date as y,
+                           sum(case when cb.kind='IN'  then cb.amount else 0 end)  as vin,
+                           sum(case when cb.kind='OUT' then cb.amount else 0 end)  as vout
+                      from resto.cashbook cb
+                     where cb.entry_date >= (date_trunc('year', current_date) - interval '4 years')
+                       and cb.entry_date <  (date_trunc('year', current_date) + interval '1 year')
+                       {(' and ' + ' and '.join(wh_extra)) if wh_extra else ''}
+                  group by 1
+                )
+                select to_char(s.y, 'YYYY') as ano,
+                       coalesce(a.vin,0)  as entradas_raw,
+                       coalesce(a.vout,0) as saidas_raw
+                  from series s
+                  left join agg a on a.y = s.y
+              order by s.y;
+            """
+            rows_cmp_y = qall(sql_cmp_y, tuple(params)) or []
+            dfy = pd.DataFrame(rows_cmp_y)
+            if dfy.empty:
+                st.caption("Sem lançamentos no período/critério selecionado.")
+                card_end()
+                return
+
+            dfy["entradas"] = dfy["entradas_raw"].astype(float)
+            dfy["saidas"]   = dfy["saidas_raw"].astype(float).apply(lambda x: -x if x < 0 else x)
+            dfy["saldo"]    = dfy["entradas"] - dfy["saidas"]
+
+            k1, k2, k3 = st.columns(3)
+            with k1: st.metric("Entradas (5a)", money(float(dfy["entradas"].sum())))
+            with k2: st.metric("Saídas (5a)",   money(float(dfy["saidas"].sum())))
+            with k3: st.metric("Saldo (5a)",    money(float(dfy["saldo"].sum())))
+
+            st.markdown("#### Evolução anual (últimos 5 anos)")
+            show_y = dfy[["ano","entradas","saidas","saldo"]]
+            st.dataframe(show_y, use_container_width=True, hide_index=True)
+            st.bar_chart(show_y.set_index("ano")[["entradas","saidas"]], use_container_width=True)
+
+            csv = show_y.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Exportar CSV (Comparativo Anual)", data=csv,
+                               file_name="comparativo_anual.csv", mime="text/csv")
 
         card_end()
 
