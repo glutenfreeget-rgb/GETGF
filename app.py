@@ -1,6 +1,6 @@
 
 import os
-from datetime import date, timedelta
+from datetime import date, time
 from typing import Any, Dict, List, Optional, Tuple
 
 # ===================== HELPER: inferir método pela descrição =====================
