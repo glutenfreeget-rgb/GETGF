@@ -694,7 +694,9 @@ def page_producao():
     
 # ===================== ESTOQUE =====================
 def page_estoque():
-    # helper de rerun compatível
+    import pandas as pd
+
+    # --- helper de rerun (compatível)
     def _rerun():
         try:
             st.rerun()
@@ -702,33 +704,42 @@ def page_estoque():
             if hasattr(st, "experimental_rerun"):
                 st.experimental_rerun()
 
-    # garante tabelas/colunas necessárias sem mexer no que já existe
+    # --- garante tabelas/colunas necessárias sem quebrar o que já existe
     def _ensure_inventory_schema():
         qexec("""
-        create table if not exists resto.supplier (
-            id          bigserial primary key,
-            name        text not null,
-            doc         varchar(32),
-            phone       text,
-            email       text,
-            note        text,
-            active      boolean default true,
-            created_at  timestamptz default now()
-        );
+        do $$
+        begin
+          -- tabela de fornecedores
+          create table if not exists resto.supplier (
+              id          bigserial primary key,
+              name        text not null,
+              created_at  timestamptz default now()
+          );
 
-        -- Campos úteis no cadastro de produtos (não interfere no que já existe)
-        alter table resto.product add column if not exists unit        text default 'un';
-        alter table resto.product add column if not exists category    text;
-        alter table resto.product add column if not exists supplier_id bigint references resto.supplier(id);
-        alter table resto.product add column if not exists barcode     text;
-        alter table resto.product add column if not exists min_stock   numeric(14,3) default 0;
-        alter table resto.product add column if not exists last_cost   numeric(14,2) default 0;
-        alter table resto.product add column if not exists active      boolean default true;
+          -- garante colunas necessárias
+          alter table resto.supplier add column if not exists doc        varchar(32);
+          alter table resto.supplier add column if not exists phone      text;
+          alter table resto.supplier add column if not exists email      text;
+          alter table resto.supplier add column if not exists note       text;
+          alter table resto.supplier add column if not exists active     boolean default true;
 
-        create index if not exists supplier_name_idx on resto.supplier (lower(name));
-        create index if not exists product_name_idx  on resto.product  (lower(name));
+          -- índices úteis
+          create index if not exists supplier_name_idx on resto.supplier (lower(name));
+
+          -- campos úteis no cadastro de produtos
+          alter table resto.product  add column if not exists unit        text default 'un';
+          alter table resto.product  add column if not exists category    text;
+          alter table resto.product  add column if not exists supplier_id bigint references resto.supplier(id);
+          alter table resto.product  add column if not exists barcode     text;
+          alter table resto.product  add column if not exists min_stock   numeric(14,3) default 0;
+          alter table resto.product  add column if not exists last_cost   numeric(14,2) default 0;
+          alter table resto.product  add column if not exists active      boolean default true;
+
+          create index if not exists product_name_idx  on resto.product (lower(name));
+        end $$;
         """)
 
+    # garante esquema antes de qualquer consulta
     _ensure_inventory_schema()
 
     header("📦 Estoque", "Saldos, movimentos e lotes/validade.")
@@ -737,7 +748,10 @@ def page_estoque():
     # ============ Aba: Saldos ============
     with tabs[0]:
         card_start()
-        rows = qall("select * from resto.v_stock order by name;")
+        try:
+            rows = qall("select * from resto.v_stock order by name;")
+        except Exception:
+            rows = []
         st.dataframe(pd.DataFrame(rows or []), use_container_width=True, hide_index=True)
         card_end()
 
@@ -813,7 +827,11 @@ def page_estoque():
                 _rerun()
 
         # ---- Lista/edição de fornecedores
-        sup = qall("select id, name, doc, phone, email, active from resto.supplier order by name;") or []
+        try:
+            sup = qall("select id, name, doc, phone, email, active from resto.supplier order by name;") or []
+        except Exception:
+            _ensure_inventory_schema()
+            sup = qall("select id, name, doc, phone, email, active from resto.supplier order by name;") or []
         df_sup = pd.DataFrame(sup)
         if not df_sup.empty:
             df_sup["Excluir?"] = False
@@ -826,7 +844,14 @@ def page_estoque():
                 "active": st.column_config.CheckboxColumn("Ativo"),
                 "Excluir?": st.column_config.CheckboxColumn("Excluir?", help="Marca para excluir"),
             }
-            edited_sup = st.data_editor(df_sup, column_config=cfg_sup, hide_index=True, num_rows="fixed", key="sup_editor", use_container_width=True)
+            edited_sup = st.data_editor(
+                df_sup,
+                column_config=cfg_sup,
+                hide_index=True,
+                num_rows="fixed",
+                key="sup_editor",
+                use_container_width=True
+            )
 
             colA, colB = st.columns(2)
             with colA:
@@ -846,7 +871,6 @@ def page_estoque():
                 to_del = new.index[new["Excluir?"] == True].tolist()
                 for sid in to_del:
                     try:
-                        # tentativa de excluir; se houver produtos vinculados, vai falhar por FK (se existir) ou por lógica de negócios
                         qexec("delete from resto.supplier where id=%s;", (sid,))
                         delc += 1
                     except Exception:
@@ -862,7 +886,8 @@ def page_estoque():
                                 update resto.supplier
                                    set name=%s, doc=%s, phone=%s, email=%s, active=%s
                                  where id=%s;
-                            """, (b["name"], b.get("doc"), b.get("phone"), b.get("email"), bool(b.get("active")), int(sid)))
+                            """, (b["name"], b.get("doc"), b.get("phone"), b.get("email"),
+                                  bool(b.get("active")), int(sid)))
                             upd += 1
                         except Exception:
                             err += 1
@@ -892,7 +917,8 @@ def page_estoque():
                 pr_bar  = st.text_input("Código de barras", value="")
             s1, s2 = st.columns(2)
             with s1:
-                pr_sup = st.selectbox("Fornecedor", options=sup_opts, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+                pr_sup = st.selectbox("Fornecedor", options=sup_opts,
+                                      format_func=lambda x: x[1] if isinstance(x, tuple) else x)
             with s2:
                 pr_active = st.checkbox("Ativo", value=True)
             pr_submit = st.form_submit_button("➕ Adicionar insumo")
@@ -917,23 +943,24 @@ def page_estoque():
         with f2:
             p_cat = st.text_input("Filtrar por categoria (opcional)", key="prod_cat")
         with f3:
-            p_supf = st.selectbox("Fornecedor (filtro)", options=[(0,"— todos —")] + [(r["id"], r["name"]) for r in sup_rows],
+            p_supf = st.selectbox("Fornecedor (filtro)",
+                                  options=[(0,"— todos —")] + [(r["id"], r["name"]) for r in sup_rows],
                                   format_func=lambda x: x[1], key="prod_supf")
         with f4:
             p_only_active = st.checkbox("Somente ativos", value=True, key="prod_only_active")
 
         wh = []
-        pr = []
+        prms = []
         if p_q.strip():
             wh.append("(lower(p.name) like lower(%s) or lower(coalesce(p.category,'')) like lower(%s) or coalesce(p.barcode,'') like %s)")
             like = f"%{p_q.strip()}%"
-            pr += [like, like, like]
+            prms += [like, like, like]
         if p_cat.strip():
             wh.append("lower(coalesce(p.category,'')) = lower(%s)")
-            pr.append(p_cat.strip())
+            prms.append(p_cat.strip())
         if p_supf and isinstance(p_supf, tuple) and p_supf[0] != 0:
             wh.append("p.supplier_id = %s")
-            pr.append(int(p_supf[0]))
+            prms.append(int(p_supf[0]))
         if p_only_active:
             wh.append("p.active is true")
 
@@ -946,7 +973,7 @@ def page_estoque():
              order by lower(p.name)
              limit 1000;
         """
-        prows = qall(sql_list, tuple(pr)) or []
+        prows = qall(sql_list, tuple(prms)) or []
         dfp = pd.DataFrame(prows)
 
         st.markdown("### Lista de insumos")
@@ -992,7 +1019,6 @@ def page_estoque():
                 to_del = new.index[new["Excluir?"] == True].tolist()
                 for pid in to_del:
                     try:
-                        # se houver movimentos vinculados, o banco pode vetar; trate o erro
                         qexec("delete from resto.product where id=%s;", (pid,))
                         delc += 1
                     except Exception:
@@ -1024,6 +1050,7 @@ def page_estoque():
             st.caption("Nenhum insumo encontrado para os filtros.")
 
         card_end()
+
 
 
 # ===================== FINANCEIRO =====================
