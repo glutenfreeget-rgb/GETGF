@@ -588,109 +588,407 @@ def page_receitas_precos():
             st.markdown(f"**Preço sugerido:** {money(preco_sugerido)} • **Receita líquida estimada:** {money(preco_liquido)}")
         card_end()
 
+# ===================== PRODUÇÃO =====================
 def page_producao():
+    import pandas as pd
+    from datetime import date
+
+    # ---------------- helpers ----------------
+    def _rerun():
+        try:
+            st.rerun()
+        except Exception:
+            if hasattr(st, "experimental_rerun"):
+                st.experimental_rerun()
+
+    def _ensure_production_schema():
+        # Garante tabelas necessárias sem quebrar o que já existe
+        qexec("""
+        do $$
+        begin
+          -- Receita (1:1 com produto)
+          create table if not exists resto.recipe (
+              id           bigserial primary key,
+              product_id   bigint not null references resto.product(id) on delete cascade,
+              yield_qty    numeric(14,3) default 1,
+              overhead_pct numeric(6,2)  default 0,   -- despesas gerais %
+              loss_pct     numeric(6,2)  default 0,   -- perdas/rendimento %
+              note         text,
+              updated_at   timestamptz default now()
+          );
+          create unique index if not exists recipe_uq_product on resto.recipe(product_id);
+
+          -- Itens da receita (ingredientes)
+          create table if not exists resto.recipe_item (
+              id           bigserial primary key,
+              recipe_id    bigint not null references resto.recipe(id) on delete cascade,
+              ingredient_id bigint not null references resto.product(id),
+              qty          numeric(14,3) not null,  -- quantidade na unidade do ingrediente
+              unit_id      bigint,                  -- opcional: unidade exibida
+              conversion_factor numeric(14,6) default 1.0, -- fator adicional (ex. perdas pré-cocção)
+              note         text
+          );
+          create index if not exists recipe_item_recipe_idx on resto.recipe_item(recipe_id);
+
+          -- Produção (ordem de produção)
+          create table if not exists resto.production (
+              id          bigserial primary key,
+              date        timestamptz default now(),
+              product_id  bigint not null references resto.product(id),
+              qty         numeric(14,3) not null,
+              unit_cost   numeric(14,4) not null,
+              total_cost  numeric(14,2) not null,
+              lot_number  text,
+              expiry_date date,
+              note        text
+          );
+
+          -- Consumo por produção (para rastreabilidade)
+          create table if not exists resto.production_item (
+              id             bigserial primary key,
+              production_id  bigint not null references resto.production(id) on delete cascade,
+              ingredient_id  bigint not null references resto.product(id),
+              lot_id         bigint,  -- id do purchase_item/lote consumido (se aplicável)
+              qty            numeric(14,3) not null,
+              unit_cost      numeric(14,4) not null,
+              total_cost     numeric(14,2) not null
+          );
+          create index if not exists prod_item_prod_idx on resto.production_item(production_id);
+
+          -- Campos auxiliares nos produtos (defensivo)
+          alter table resto.product add column if not exists unit        text default 'un';
+          alter table resto.product add column if not exists last_cost   numeric(14,2) default 0;
+          alter table resto.product add column if not exists active      boolean default true;
+        end $$;
+        """)
+
+    _ensure_production_schema()
+
     header("🍳 Produção", "Ordem de produção: consome ingredientes (por lote) e gera produto final.")
-    prods = qall("select id, name from resto.product order by name;")
-    units = {r["id"]: r["abbr"] for r in qall("select id, abbr from resto.unit;")}
+    # Produtos e unidades
+    prods = qall("select id, name, unit, last_cost from resto.product where active is true order by name;") or []
+    if not prods:
+        st.warning("Cadastre produtos em **Estoque → Cadastro** antes.")
+        return
+    prod_opts = [(p["id"], p["name"]) for p in prods]
 
-    card_start()
-    st.subheader("Nova produção")
-    prod = st.selectbox("Produto final *", options=[(p['id'], p['name']) for p in prods], format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    # Seleção do produto final (compartilhada entre as abas)
+    prod = st.selectbox(
+        "Produto final *",
+        options=prod_opts,
+        key="producao_prod_sel",
+        format_func=lambda x: x[1] if isinstance(x, tuple) else x
+    )
     if not prod:
-        card_end()
         return
+    prod_id = prod[0]
+    prod_row = next((r for r in prods if r["id"] == prod_id), {"unit": "un", "last_cost": 0})
 
-    recipe = qone("select * from resto.recipe where product_id=%s;", (prod[0],))
-    if not recipe:
-        st.warning("Este produto não possui ficha técnica (receita). Cadastre em 'Receitas & Preços'.")
+    tabs = st.tabs(["🛠️ Nova produção", "📜 Ficha técnica (receita)"])
+
+    # ==================== Aba Ficha Técnica ====================
+    with tabs[1]:
+        card_start()
+        st.subheader("Ficha técnica do produto")
+
+        # carrega/Cria a receita (uma por produto)
+        recipe = qone("select * from resto.recipe where product_id=%s;", (prod_id,))
+        if not recipe:
+            st.info("Este produto ainda não possui ficha técnica.")
+            with st.form(f"form_new_recipe_{prod_id}"):
+                colr1, colr2, colr3 = st.columns(3)
+                with colr1:
+                    r_yield = st.number_input("Rendimento (quantidade produzida)", min_value=0.001, step=0.001, value=1.000)
+                with colr2:
+                    r_over = st.number_input("Overhead (%)", min_value=0.0, step=0.5, value=0.0, format="%.2f")
+                with colr3:
+                    r_loss = st.number_input("Perdas (%)", min_value=0.0, step=0.5, value=0.0, format="%.2f")
+                note = st.text_area("Observações (opcional)", value="")
+                ok_new = st.form_submit_button("➕ Criar ficha técnica")
+            if ok_new:
+                newr = qone("""
+                    insert into resto.recipe (product_id, yield_qty, overhead_pct, loss_pct, note)
+                    values (%s,%s,%s,%s,%s)
+                    returning *;
+                """, (prod_id, float(r_yield), float(r_over), float(r_loss), note or None))
+                st.success("Ficha técnica criada.")
+                _rerun()
+            card_end()
+            return
+
+        # edição dos parâmetros da receita
+        with st.form(f"form_update_recipe_{recipe['id']}"):
+            colr1, colr2, colr3 = st.columns(3)
+            with colr1:
+                r_yield = st.number_input("Rendimento (quantidade produzida)", min_value=0.001, step=0.001,
+                                          value=float(recipe.get("yield_qty") or 1.0), format="%.3f")
+            with colr2:
+                r_over = st.number_input("Overhead (%)", min_value=0.0, step=0.5,
+                                         value=float(recipe.get("overhead_pct") or 0.0), format="%.2f")
+            with colr3:
+                r_loss = st.number_input("Perdas (%)", min_value=0.0, step=0.5,
+                                         value=float(recipe.get("loss_pct") or 0.0), format="%.2f")
+            note = st.text_area("Observações", value=recipe.get("note") or "", height=70)
+            ok_upd = st.form_submit_button("💾 Salvar parâmetros")
+        if ok_upd:
+            qexec("""
+                update resto.recipe
+                   set yield_qty=%s, overhead_pct=%s, loss_pct=%s, note=%s, updated_at=now()
+                 where id=%s;
+            """, (float(r_yield), float(r_over), float(r_loss), note or None, recipe["id"]))
+            st.success("Parâmetros da ficha técnica atualizados.")
+            _rerun()
+
+        st.divider()
+        st.subheader("Ingredientes da receita")
+
+        # dados auxiliares
+        units_rows = qall("select id, abbr from resto.unit order by abbr;") or []
+        abbr_by_id = {u["id"]: u["abbr"] for u in units_rows}
+        id_by_abbr = {u["abbr"]: u["id"] for u in units_rows}
+
+        ing_rows = qall("""
+            select ri.id, ri.ingredient_id, p.name as ingrediente, ri.qty, ri.unit_id, ri.conversion_factor
+              from resto.recipe_item ri
+              join resto.product p on p.id = ri.ingredient_id
+             where ri.recipe_id=%s
+             order by p.name;
+        """, (recipe["id"],)) or []
+
+        # grid editável
+        df_ing = pd.DataFrame(ing_rows)
+        if not df_ing.empty:
+            df_ing["Un"] = df_ing["unit_id"].map(abbr_by_id).fillna("")
+            df_ing["Excluir?"] = False
+
+            cfg_ing = {
+                "id": st.column_config.NumberColumn("ID", disabled=True),
+                "ingrediente": st.column_config.TextColumn("Ingrediente", disabled=True),
+                "qty": st.column_config.NumberColumn("Qtd", step=0.001, format="%.3f"),
+                "Un": st.column_config.SelectboxColumn("Unidade", options=list(id_by_abbr.keys())),
+                "conversion_factor": st.column_config.NumberColumn("Fator conv.", step=0.01, format="%.2f",
+                                                                   help="Multiplica a quantidade (ex.: perdas pré-processo)"),
+                "Excluir?": st.column_config.CheckboxColumn("Excluir?", help="Marque para remover o item da receita"),
+            }
+
+            edited_ing = st.data_editor(
+                df_ing[["id", "ingrediente", "qty", "Un", "conversion_factor", "Excluir?"]],
+                column_config=cfg_ing,
+                hide_index=True,
+                num_rows="fixed",
+                key=f"recipe_ing_editor_{recipe['id']}",
+                use_container_width=True
+            )
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                apply_edit = st.button("💾 Salvar alterações (ingredientes)")
+            with col_b:
+                refresh_ing = st.button("🔄 Atualizar lista")
+
+            if refresh_ing:
+                _rerun()
+
+            if apply_edit:
+                orig = df_ing.set_index("id")
+                new  = edited_ing.set_index("id")
+                upd = 0; delc = 0; err = 0
+
+                # deletar
+                to_del = new.index[new["Excluir?"] == True].tolist()
+                for rid in to_del:
+                    try:
+                        qexec("delete from resto.recipe_item where id=%s;", (int(rid),))
+                        delc += 1
+                    except Exception:
+                        err += 1
+
+                # atualizar
+                keep_ids = [i for i in new.index if i not in to_del]
+                for rid in keep_ids:
+                    a = orig.loc[rid]; b = new.loc[rid]
+                    changed = any(str(a.get(f,"")) != str(b.get(f,"")) for f in ["qty", "conversion_factor"]) \
+                              or (abbr_by_id.get(a.get("unit_id")) != b.get("Un"))
+                    if not changed:
+                        continue
+                    try:
+                        new_unit_id = id_by_abbr.get(b.get("Un") or "", None)
+                        qexec("""
+                            update resto.recipe_item
+                               set qty=%s, unit_id=%s, conversion_factor=%s
+                             where id=%s;
+                        """, (float(b["qty"]), new_unit_id, float(b.get("conversion_factor") or 1), int(rid)))
+                        upd += 1
+                    except Exception:
+                        err += 1
+
+                st.success(f"Ingredientes: ✅ {upd} atualizado(s) • 🗑️ {delc} removido(s) • ⚠️ {err} erro(s).")
+                _rerun()
+        else:
+            st.caption("Nenhum ingrediente na ficha técnica.")
+
+        with st.expander("➕ Adicionar ingrediente", expanded=False):
+            # lista de ingredientes (todos os produtos, exceto o próprio produto final)
+            ing_opts = [(p["id"], p["name"]) for p in prods if p["id"] != prod_id]
+            coln1, coln2, coln3 = st.columns([3,1,1])
+            with coln1:
+                ing_sel = st.selectbox("Ingrediente", options=ing_opts, key=f"ing_sel_{recipe['id']}",
+                                       format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+            with coln2:
+                ing_qty = st.number_input("Quantidade", min_value=0.001, step=0.001, value=1.000,
+                                          key=f"ing_qty_{recipe['id']}")
+            with coln3:
+                un_abbr = st.selectbox("Un.", options=[""] + [u["abbr"] for u in units_rows], index=0,
+                                       key=f"ing_unit_{recipe['id']}")
+            conv = st.number_input("Fator de conversão (opcional)", min_value=0.0, step=0.01, value=1.00,
+                                   key=f"ing_conv_{recipe['id']}")
+            add_ing = st.button("Adicionar ingrediente", key=f"btn_add_ing_{recipe['id']}")
+
+            if add_ing and ing_sel:
+                unit_id = id_by_abbr.get(un_abbr) if un_abbr else None
+                qexec("""
+                    insert into resto.recipe_item (recipe_id, ingredient_id, qty, unit_id, conversion_factor)
+                    values (%s,%s,%s,%s,%s);
+                """, (recipe["id"], int(ing_sel[0]), float(ing_qty), unit_id, float(max(conv, 0.0) or 1.0)))
+                st.success("Ingrediente incluído na ficha técnica.")
+                _rerun()
+
+        # pré-cálculo de custo por rendimento usando last_cost dos ingredientes
+        cost_rows = qall("""
+            select ri.qty, ri.conversion_factor, coalesce(p.last_cost,0) as last_cost
+              from resto.recipe_item ri
+              join resto.product p on p.id = ri.ingredient_id
+             where ri.recipe_id=%s;
+        """, (recipe["id"],)) or []
+        if cost_rows:
+            tot_ing_cost = 0.0
+            for r in cost_rows:
+                tot_ing_cost += float(r["qty"]) * float(r.get("conversion_factor") or 1) * float(r["last_cost"])
+            batch_cost = tot_ing_cost * (1 + float(recipe.get("overhead_pct") or 0)/100.0) * (1 + float(recipe.get("loss_pct") or 0)/100.0)
+            unit_cost = batch_cost / float(max(recipe.get("yield_qty") or 1, 1e-6))
+            st.info(f"💡 **Estimativa de custo por unidade (base last_cost):** {money(unit_cost)}  —  Lote: {money(batch_cost)}")
+
         card_end()
-        return
 
-    yield_qty = float(recipe["yield_qty"] or 0.0)
-    if yield_qty <= 0:
-        st.error("Ficha técnica inválida: rendimento deve ser > 0.")
-        card_end()
-        return
+    # ==================== Aba Nova Produção ====================
+    with tabs[0]:
+        card_start()
+        st.subheader("Nova produção")
 
-    with st.form("form_producao"):
-        qty_out = st.number_input("Quantidade a produzir (na unidade do produto)", 0.0, 1_000_000.0, 10.0, 0.1)
-        lot_final = st.text_input("Lote do produto final (opcional)")
-        expiry_final = st.date_input("Validade do produto final", value=None)
-        ok = st.form_submit_button("Produzir")
+        recipe = qone("select * from resto.recipe where product_id=%s;", (prod_id,))
+        if not recipe:
+            st.warning("Este produto não possui ficha técnica (receita). Cadastre na aba **Ficha técnica**.")
+            card_end()
+            return
 
-    if not ok or qty_out <= 0:
-        card_end()
-        return
+        yield_qty = float(recipe.get("yield_qty") or 0.0)
+        if yield_qty <= 0:
+            st.error("Ficha técnica inválida: rendimento deve ser > 0.")
+            card_end()
+            return
 
-    # Carrega ingredientes da receita
-    ingredients = qall("""
-        select ri.ingredient_id, p.name as ingrediente, ri.qty, ri.conversion_factor, ri.unit_id
-          from resto.recipe_item ri
-          join resto.product p on p.id = ri.ingredient_id
-         where ri.recipe_id=%s
-         order by p.name;
-    """, (recipe["id"],))
+        # Entrada de dados da OP
+        with st.form(f"form_producao_{prod_id}"):
+            qty_out = st.number_input(f"Quantidade a produzir ({prod_row.get('unit') or 'un'})",
+                                      min_value=0.001, step=0.001, value=10.000)
+            c1, c2 = st.columns([1,1])
+            with c1:
+                lot_final = st.text_input("Lote do produto final (opcional)", value="")
+            with c2:
+                use_exp = st.checkbox("Definir validade", value=False, key=f"use_exp_{prod_id}")
+            expiry_final = None
+            if use_exp:
+                expiry_final = st.date_input("Validade do produto final", value=date.today())
+            ok = st.form_submit_button("✅ Produzir")
 
-    scale = qty_out / yield_qty
-    # Aloca por lotes e calcula custo
-    consumos = []  # list of dicts: ingredient_id, lot_id, qty, unit_cost, total
-    total_ing_cost = 0.0
-    falta = []
+        if not ok or qty_out <= 0:
+            card_end()
+            return
 
-    for it in ingredients:
-        need = float(it["qty"] or 0.0) * float(it["conversion_factor"] or 1.0) * scale
-        allocs = fifo_allocate(it["ingredient_id"], need)
-        allocated = sum(a["qty"] for a in allocs)
-        if allocated + 1e-9 < need:
-            falta.append((it["ingrediente"], need, allocated))
-        for a in allocs:
-            total = a["qty"] * float(a["unit_cost"] or 0.0)
-            consumos.append({
-                "ingredient_id": it["ingredient_id"],
-                "ingrediente": it["ingrediente"],
-                "lot_id": a["lot_id"],
-                "qty": a["qty"],
-                "unit_cost": a["unit_cost"],
-                "total": total
-            })
-            total_ing_cost += total
+        # Carrega ingredientes da receita
+        ingredients = qall("""
+            select ri.ingredient_id, p.name as ingrediente, ri.qty, ri.conversion_factor, ri.unit_id
+              from resto.recipe_item ri
+              join resto.product p on p.id = ri.ingredient_id
+             where ri.recipe_id=%s
+             order by p.name;
+        """, (recipe["id"],)) or []
 
-    if falta:
-        st.error("Estoque insuficiente para os ingredientes:\n" + "\n".join([f"- {n}: precisa {q:.3f}, alocado {a:.3f}" for n,q,a in falta]))
-        card_end()
-        return
+        if not ingredients:
+            st.error("Ficha técnica sem ingredientes.")
+            card_end()
+            return
 
-    # Calcula custo do lote final
-    overhead = float(recipe["overhead_pct"] or 0.0) / 100.0
-    loss = float(recipe["loss_pct"] or 0.0) / 100.0
-    batch_cost = total_ing_cost * (1 + overhead) * (1 + loss)
-    unit_cost_est = batch_cost / qty_out if qty_out > 0 else 0.0
+        # Escala e aloca por FIFO (função fifo_allocate deve existir no seu DB)
+        scale = float(qty_out) / yield_qty
+        consumos = []   # [{ingredient_id, ingrediente, lot_id, qty, unit_cost, total}]
+        total_ing_cost = 0.0
+        faltantes = []
 
-    # Persiste produção
-    prow = qone("""
-        insert into resto.production(date, product_id, qty, unit_cost, total_cost, lot_number, expiry_date, note)
-        values (now(), %s, %s, %s, %s, %s, %s, %s)
-        returning id;
-    """, (prod[0], qty_out, unit_cost_est, batch_cost, (lot_final or None), (str(expiry_final) if expiry_final else None), ""))
-    production_id = prow["id"]
+        for it in ingredients:
+            need = float(it["qty"] or 0.0) * float(it.get("conversion_factor") or 1.0) * scale
+            allocs = fifo_allocate(it["ingredient_id"], need)  # -> lista de {lot_id, qty, unit_cost}
+            got = sum(a["qty"] for a in allocs)
+            if got + 1e-9 < need:
+                faltantes.append((it["ingrediente"], need, got))
+            for a in allocs:
+                total = float(a["qty"]) * float(a.get("unit_cost") or 0.0)
+                consumos.append({
+                    "ingredient_id": it["ingredient_id"],
+                    "ingrediente": it["ingrediente"],
+                    "lot_id": a["lot_id"],
+                    "qty": float(a["qty"]),
+                    "unit_cost": float(a.get("unit_cost") or 0.0),
+                    "total": total
+                })
+                total_ing_cost += total
 
-    # Registra consumo de ingredientes (OUT) por lote
-    for c in consumos:
-        pi = qone("""
-            insert into resto.production_item(production_id, ingredient_id, lot_id, qty, unit_cost, total_cost)
-            values (%s,%s,%s,%s,%s,%s)
+        if faltantes:
+            st.error("Estoque insuficiente:\n" + "\n".join([f"- {n}: precisa {q:.3f}, alocado {a:.3f}" for n, q, a in faltantes]))
+            card_end()
+            return
+
+        # Custo do lote
+        overhead = float(recipe.get("overhead_pct") or 0.0) / 100.0
+        loss = float(recipe.get("loss_pct") or 0.0) / 100.0
+        batch_cost = total_ing_cost * (1 + overhead) * (1 + loss)
+        unit_cost_est = batch_cost / float(qty_out)
+
+        # Persiste produção
+        prow = qone("""
+            insert into resto.production(date, product_id, qty, unit_cost, total_cost, lot_number, expiry_date, note)
+            values (now(), %s, %s, %s, %s, %s, %s, %s)
             returning id;
-        """, (production_id, c["ingredient_id"], c["lot_id"], c["qty"], c["unit_cost"], c["total"]))
-        note = f"production:{production_id};lot:{c['lot_id']}"
-        qexec("select resto.sp_register_movement(%s,'OUT',%s,%s,'production',%s,%s);", (c["ingredient_id"], c["qty"], c["unit_cost"], pi["id"], note))
+        """, (prod_id, float(qty_out), float(unit_cost_est), float(batch_cost),
+              (lot_final or None), (str(expiry_final) if expiry_final else None), ""))
+        production_id = prow["id"]
 
-    # Registra entrada do produto final (IN)
-    note_final = f"production:{production_id}" + (f";lot:{lot_final}" if lot_final else "")
-    qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'production',%s,%s);", (prod[0], qty_out, unit_cost_est, production_id, note_final))
+        # Saída dos ingredientes (OUT) por lote + rastreabilidade
+        for c in consumos:
+            pi = qone("""
+                insert into resto.production_item(production_id, ingredient_id, lot_id, qty, unit_cost, total_cost)
+                values (%s,%s,%s,%s,%s,%s)
+                returning id;
+            """, (production_id, c["ingredient_id"], c["lot_id"], c["qty"], c["unit_cost"], c["total"]))
+            note = f"production:{production_id};lot:{c['lot_id']}"
+            qexec("select resto.sp_register_movement(%s,'OUT',%s,%s,'production',%s,%s);",
+                  (c["ingredient_id"], c["qty"], c["unit_cost"], pi["id"], note))
 
-    st.success(f"Produção #{production_id} registrada. CMP do produto final atualizado.")
-    st.markdown(f"**Custo do lote:** {money(batch_cost)} • **Custo unitário aplicado no CMP:** {money(unit_cost_est)}")
-    card_end()
+        # Entrada do produto final (IN)
+        note_final = f"production:{production_id}" + (f";lot:{lot_final}" if lot_final else "")
+        qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'production',%s,%s);",
+              (prod_id, float(qty_out), float(unit_cost_est), production_id, note_final))
+
+        st.success(f"Produção #{production_id} registrada.")
+        st.markdown(f"**Custo do lote:** {money(batch_cost)} • **Custo unitário aplicado (CMP):** {money(unit_cost_est)}")
+
+        # Preview dos consumos
+        if consumos:
+            dfc = pd.DataFrame(consumos)
+            dfc = dfc[["ingrediente","lot_id","qty","unit_cost","total"]]
+            st.dataframe(dfc, use_container_width=True, hide_index=True)
+        card_end()
+
     
 # ===================== ESTOQUE =====================
 def page_estoque():
