@@ -618,12 +618,11 @@ def page_producao():
               id           bigserial primary key,
               product_id   bigint not null references resto.product(id) on delete cascade,
               yield_qty    numeric(14,3) default 1,
-              overhead_pct numeric(6,3)  default 0,   -- despesas gerais %
-              loss_pct     numeric(6,3)  default 0,   -- perdas/rendimento %
+              overhead_pct numeric(6,3)  default 0,
+              loss_pct     numeric(6,3)  default 0,
               note         text,
               updated_at   timestamptz default now()
           );
-          -- garante colunas se já existia
           alter table resto.recipe add column if not exists yield_qty    numeric(14,3) default 1;
           alter table resto.recipe add column if not exists overhead_pct numeric(6,3)  default 0;
           alter table resto.recipe add column if not exists loss_pct     numeric(6,3)  default 0;
@@ -631,7 +630,7 @@ def page_producao():
           alter table resto.recipe add column if not exists updated_at   timestamptz default now();
           create unique index if not exists recipe_uq_product on resto.recipe(product_id);
 
-          -- ===== Itens da receita (ingredientes) =====
+          -- ===== Itens da receita =====
           create table if not exists resto.recipe_item (
               id                bigserial primary key,
               recipe_id         bigint not null references resto.recipe(id) on delete cascade,
@@ -641,13 +640,12 @@ def page_producao():
               conversion_factor numeric(14,6) default 1.0,
               note              text
           );
-          -- garante colunas
           alter table resto.recipe_item add column if not exists unit_id           bigint;
           alter table resto.recipe_item add column if not exists conversion_factor numeric(14,6) default 1.0;
           alter table resto.recipe_item add column if not exists note              text;
           create index if not exists recipe_item_recipe_idx on resto.recipe_item(recipe_id);
 
-          -- ===== Produção (ordem de produção) =====
+          -- ===== Produção =====
           create table if not exists resto.production (
               id          bigserial primary key,
               date        timestamptz default now(),
@@ -679,10 +677,18 @@ def page_producao():
         end $$;
         """)
 
-        # Unidades padrão (idempotente)
-        for abbr, name in [("un","Unidade"),("kg","Quilo"),("g","Grama"),("L","Litro"),
-                           ("ml","Mililitro"),("cx","Caixa"),("pct","Pacote")]:
-            qexec("insert into resto.unit(abbr,name) values (%s,%s) on conflict (abbr) do nothing;", (abbr, name))
+        # Unidades padrão (idempotente e sem UniqueViolation, mesmo com constraints diferentes)
+        for abbr, name in [("un","Unidade"),("kg","Quilo"),("g","Grama"),
+                           ("L","Litro"),("ml","Mililitro"),("cx","Caixa"),("pct","Pacote")]:
+            qexec("""
+                insert into resto.unit (abbr, name)
+                select %s, %s
+                where not exists (
+                    select 1 from resto.unit u
+                     where u.abbr = %s
+                        or lower(coalesce(u.name,'')) = lower(%s)
+                );
+            """, (abbr, name, abbr, name))
 
     _ensure_production_schema()
 
@@ -728,8 +734,8 @@ def page_producao():
                 note = st.text_area("Observações (opcional)", value="")
                 ok_new = st.form_submit_button("➕ Criar ficha técnica")
             if ok_new:
-                # UPSERT por product_id para evitar erro de duplicidade / colunas ausentes
-                newr = qone("""
+                # UPSERT por product_id
+                qone("""
                     insert into resto.recipe (product_id, yield_qty, overhead_pct, loss_pct, note)
                     values (%s,%s,%s,%s,%s)
                     on conflict (product_id) do update
@@ -857,7 +863,6 @@ def page_producao():
             st.caption("Nenhum ingrediente na ficha técnica.")
 
         with st.expander("➕ Adicionar ingrediente", expanded=False):
-            # lista de ingredientes (todos os produtos, exceto o próprio produto final)
             ing_opts = [(p["id"], p["name"]) for p in prods if p["id"] != prod_id]
             coln1, coln2, coln3 = st.columns([3,1,1])
             with coln1:
@@ -882,7 +887,7 @@ def page_producao():
                 st.success("Ingrediente incluído na ficha técnica.")
                 _rerun()
 
-        # pré-cálculo de custo por rendimento usando last_cost dos ingredientes
+        # pré-cálculo de custo por rendimento (base last_cost)
         cost_rows = qall("""
             select ri.qty, ri.conversion_factor, coalesce(p.last_cost,0) as last_cost
               from resto.recipe_item ri
