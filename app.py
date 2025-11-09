@@ -254,267 +254,118 @@ def page_dashboard():
         card_end()
 
 
-# ===================== PRECIFICAÇÃO =====================
-def page_receitas_precos():
-    import pandas as pd
+def page_cadastros():
+    header("🗂️ Cadastros", "Unidades, Categorias, Produtos e Fornecedores.")
+    tabs = st.tabs(["Unidades", "Categorias", "Fornecedores", "Produtos"])
 
-    # Helpers
-    def _rerun():
-        try:
-            st.rerun()
-        except Exception:
-            if hasattr(st, "experimental_rerun"):
-                st.experimental_rerun()
-
-    def _money(x):
-        try:
-            return money(x)
-        except Exception:
-            try:
-                v = float(x or 0)
-            except Exception:
-                v = 0.0
-            s = f"R$ {v:,.2f}"
-            return s.replace(",", "X").replace(".", ",").replace("X", ".")
-
-    def _has_yield_unit_col() -> bool:
-        r = qone("""
-            select exists (
-                select 1 from information_schema.columns
-                 where table_schema='resto' and table_name='recipe' and column_name='yield_unit_id'
-            ) as ok;
-        """)
-        return bool(r and r.get("ok"))
-
-    def _ensure_sale_price_column():
-        qexec("""
-            do $$
-            begin
-              if not exists (
-                select 1 from information_schema.columns
-                 where table_schema='resto' and table_name='product' and column_name='sale_price'
-              ) then
-                alter table resto.product
-                  add column sale_price numeric(14,2) default 0;
-              end if;
-            end $$;
-        """)
-
-    def _recipe_cost(product_id: int):
-        """Calcula custo estimado pelo last_cost dos ingredientes + overhead + perdas.
-           Retorna dict {'unit_cost': float, 'batch_cost': float, 'yield_qty': float, 'yield_unit': 'abbr' ou None}
-           ou None se não houver ficha técnica/ingredientes."""
-        recipe = qone("select * from resto.recipe where product_id=%s;", (product_id,))
-        if not recipe:
-            return None
-
-        items = qall("""
-            select ri.qty, coalesce(ri.conversion_factor,1) as conv, coalesce(p.last_cost,0) as last_cost
-              from resto.recipe_item ri
-              join resto.product p on p.id = ri.ingredient_id
-             where ri.recipe_id=%s;
-        """, (recipe["id"],)) or []
-
-        if not items:
-            return None
-
-        tot_ing = 0.0
-        for it in items:
-            try:
-                tot_ing += float(it["qty"]) * float(it["conv"]) * float(it["last_cost"])
-            except Exception:
-                pass
-
-        overhead = float(recipe.get("overhead_pct") or 0.0) / 100.0
-        loss     = float(recipe.get("loss_pct") or 0.0) / 100.0
-        yq       = float(recipe.get("yield_qty") or 0.0)
-        if yq <= 0:
-            return None
-
-        batch = tot_ing * (1 + overhead) * (1 + loss)
-        unit  = batch / yq if yq > 0 else 0.0
-
-        yabbr = None
-        if _has_yield_unit_col():
-            yu = recipe.get("yield_unit_id")
-            if yu:
-                r = qone("select abbr from resto.unit where id=%s;", (yu,))
-                yabbr = r["abbr"] if r else None
-
-        return {"unit_cost": unit, "batch_cost": batch, "yield_qty": yq, "yield_unit": yabbr}
-
-    header("💲 Precificação", "Simule preços e margens a partir da ficha técnica (ou último custo).")
-
-    # Garante coluna do preço de venda
-    _ensure_sale_price_column()
-
-    # Abas
-    tabs = st.tabs(["🧮 Simulador", "📊 Tabela de preços", "🧾 Produto fiscal"])
-
-    # Carrega produtos base (já puxa sale_price)
-    prods = qall("select id, name, unit, category, last_cost, sale_price, active from resto.product order by name;") or []
-    if not prods:
-        st.warning("Cadastre produtos em **Estoque → Cadastro** antes.")
-        return
-
-    # ==================== Aba: Simulador ====================
+    # ---------- Unidades ----------
     with tabs[0]:
         card_start()
-        st.subheader("Simulador de preço por produto")
-
-        prod = st.selectbox(
-            "Produto",
-            options=[(p["id"], p["name"]) for p in prods],
-            format_func=lambda x: x[1] if isinstance(x, tuple) else x,
-            key="prec_prod"
-        )
-        if not prod:
-            card_end()
-            return
-
-        pid = int(prod[0])
-        prow = next((r for r in prods if r["id"] == pid), None) or {}
-        est = _recipe_cost(pid)
-
-        base_cost = None
-        base_label = ""
-        if est:
-            base_cost = float(est["unit_cost"])
-            ytxt = f"{est['yield_qty']:.3f} {est['yield_unit']}" if est.get("yield_unit") else f"{est['yield_qty']:.3f}"
-            st.caption(f"Cálculo por ficha técnica • Rendimento: {ytxt} • Custo do lote: {_money(est['batch_cost'])}")
-            base_label = "Custo unitário estimado (ficha técnica)"
-        else:
-            base_cost = float(prow.get("last_cost") or 0.0)
-            base_label = "Custo base (last_cost do produto)"
-            st.caption("Sem ficha técnica com ingredientes → usando last_cost do produto.")
-
-        st.markdown(f"**{base_label}:** {_money(base_cost)}")
-
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            markup = st.number_input("Markup %", 0.0, 1000.0, 200.0, 0.1, format="%.2f")
-        with c2:
-            taxa = st.number_input("Taxas/Cartão %", 0.0, 30.0, 0.0, 0.1, format="%.2f")
-        with c3:
-            imp = st.number_input("Impostos %", 0.0, 50.0, 8.0, 0.1, format="%.2f",
-                                  help="Estimativa de tributos sobre venda (ex.: Simples/ISS/PIS/COFINS).")
-        with c4:
-            desc = st.number_input("Desconto médio %", 0.0, 100.0, 0.0, 0.1, format="%.2f")
-
-        preco_sugerido = base_cost * (1 + markup/100.0)
-        receita_liq = preco_sugerido * (1 - desc/100.0) * (1 - taxa/100.0) * (1 - imp/100.0)
-        margem_bruta = (receita_liq - base_cost) / preco_sugerido * 100 if preco_sugerido else 0.0
-
-        # Mostra também o preço unitário fiscal já salvo (se existir)
-        sale_price_row = qone("select sale_price from resto.product where id=%s;", (pid,))
-        sale_price = float((sale_price_row or {}).get("sale_price") or 0.0)
-        st.caption(f"Preço unitário fiscal atual: {_money(sale_price)}")
-
-        st.markdown(
-            f"**Preço sugerido:** {_money(preco_sugerido)}  \n"
-            f"**Receita líquida estimada:** {_money(receita_liq)}  \n"
-            f"**Margem bruta sobre preço sugerido:** {margem_bruta:.2f}%"
-        )
+        st.subheader("Unidades de Medida")
+        with st.form("form_unit"):
+            name = st.text_input("Nome", value="Unidade")
+            abbr = st.text_input("Abreviação", value="un")
+            base_hint = st.text_input("Observação/Conversão", value="ex: 1 un = 25 g (dica)")
+            ok = st.form_submit_button("Salvar unidade")
+        if ok and name and abbr:
+            qexec("insert into resto.unit(name, abbr, base_hint) values (%s,%s,%s) on conflict (abbr) do update set name=excluded.name, base_hint=excluded.base_hint;", (name, abbr, base_hint))
+            st.success("Unidade salva!")
+        units = qall("select id, name, abbr, base_hint from resto.unit order by abbr;")
+        st.dataframe(pd.DataFrame(units), use_container_width=True, hide_index=True)
         card_end()
 
-    # ==================== Aba: Tabela de preços ====================
+    # ---------- Categorias ----------
     with tabs[1]:
         card_start()
-        st.subheader("Tabela de preços (em massa)")
-
-        f1, f2, f3 = st.columns([2,1,1])
-        with f1:
-            f_cat = st.text_input("Filtrar por categoria (texto exato opcional)", key="prec_tab_cat")
-        with f2:
-            f_only_active = st.checkbox("Somente ativos", value=True, key="prec_tab_active")
-        with f3:
-            base_markup = st.number_input("Markup base %", 0.0, 1000.0, 200.0, 0.1, key="prec_tab_markup", format="%.2f")
-
-        f4, f5 = st.columns(2)
-        with f4:
-            base_taxa = st.number_input("Taxas/Cartão %", 0.0, 30.0, 0.0, 0.1, key="prec_tab_taxa", format="%.2f")
-        with f5:
-            base_imp = st.number_input("Impostos %", 0.0, 50.0, 8.0, 0.1, key="prec_tab_imp", format="%.2f")
-
-        rows = []
-        for p in prods:
-            if f_only_active and not p.get("active"):
-                continue
-            if f_cat.strip() and (str(p.get("category") or "") != f_cat.strip()):
-                continue
-
-            est = _recipe_cost(p["id"])
-            if est:
-                base_cost = float(est["unit_cost"])
-            else:
-                base_cost = float(p.get("last_cost") or 0.0)
-
-            ps = base_cost * (1 + base_markup/100.0)
-            rl = ps * (1 - base_taxa/100.0) * (1 - base_imp/100.0)
-            mg = (rl - base_cost) / ps * 100 if ps else 0.0
-
-            rows.append({
-                "Produto": p["name"],
-                "Categoria": p.get("category") or "",
-                "Un": p.get("unit") or "",
-                "Custo base": base_cost,
-                "Preço sugerido": ps,
-                "Preço fiscal (salvo)": float(p.get("sale_price") or 0.0),
-                "Margem bruta %": mg
-            })
-
-        df = pd.DataFrame(rows)
-        if df.empty:
-            st.caption("Nenhum produto para os filtros.")
-            card_end()
-            return
-
-        df_show = df.copy()
-        df_show["Custo base"] = df_show["Custo base"].map(_money)
-        df_show["Preço sugerido"] = df_show["Preço sugerido"].map(_money)
-        df_show["Preço fiscal (salvo)"] = df_show["Preço fiscal (salvo)"].map(_money)
-        df_show["Margem bruta %"] = df_show["Margem bruta %"].map(lambda x: f"{x:.2f}%")
-
-        st.dataframe(df_show, use_container_width=True, hide_index=True)
+        st.subheader("Categorias")
+        with st.form("form_cat"):
+            name = st.text_input("Nome da categoria")
+            ok = st.form_submit_button("Salvar categoria")
+        if ok and name:
+            qexec("insert into resto.category(name) values (%s) on conflict(name) do nothing;", (name,))
+            st.success("Categoria salva!")
+        cats = qall("select id, name from resto.category order by name;")
+        st.dataframe(pd.DataFrame(cats), use_container_width=True, hide_index=True)
         card_end()
 
-    # ==================== Aba: Produto fiscal (valor unitário) ====================
+    # ---------- Fornecedores ----------
     with tabs[2]:
         card_start()
-        st.subheader("Produto fiscal")
+        st.subheader("Fornecedores")
+        with st.form("form_sup"):
+            name = st.text_input("Nome *")
+            cnpj = st.text_input("CNPJ")
+            ie   = st.text_input("Inscrição Estadual")
+            email= st.text_input("Email")
+            phone= st.text_input("Telefone")
+            ok = st.form_submit_button("Salvar fornecedor")
+        if ok and name:
+            qexec("""
+                insert into resto.supplier(name, cnpj, ie, email, phone)
+                values (%s,%s,%s,%s,%s);
+            """, (name, cnpj, ie, email, phone))
+            st.success("Fornecedor salvo!")
+        rows = qall("select id, name, cnpj, ie, email, phone from resto.supplier order by name;")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        card_end()
 
-        prod2 = st.selectbox(
-            "Produto",
-            options=[(p["id"], p["name"]) for p in prods],
-            format_func=lambda x: x[1] if isinstance(x, tuple) else x,
-            key="prec_prod_fiscal"
-        )
-        if not prod2:
-            card_end()
-            return
+    # ---------- Produtos ----------
+    with tabs[3]:
+        card_start()
+        st.subheader("Produtos (Catálogo Fiscal)")
+        units = qall("select id, abbr from resto.unit order by abbr;")
+        cats  = qall("select id, name from resto.category order by name;")
 
-        pid2 = int(prod2[0])
-        row2 = qone("select last_cost, sale_price from resto.product where id=%s;", (pid2,)) or {}
-        last_cost = float(row2.get("last_cost") or 0.0)
-        cur_price = float(row2.get("sale_price") or 0.0)
+        with st.form("form_prod"):
+            code = st.text_input("Código interno")
+            name = st.text_input("Nome *")
+            category_id = st.selectbox("Categoria", options=[(c['id'], c['name']) for c in cats], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if cats else None)
+            unit_id = st.selectbox("Unidade *", options=[(u['id'], u['abbr']) for u in units], format_func=lambda x: x[1] if isinstance(x, tuple) else x, index=0 if units else None)
 
-        cfa, cfb = st.columns(2)
-        with cfa:
-            st.caption(f"Custo base (last_cost): {_money(last_cost)}")
-        with cfb:
-            st.caption("Defina o valor fiscal que sai nas notas/documentos.")
+            st.markdown("**Campos fiscais (opcional)**")
+            colf1, colf2, colf3, colf4 = st.columns(4)
+            with colf1:
+                ncm = st.text_input("NCM") ; cest = st.text_input("CEST")
+            with colf2:
+                cfop = st.text_input("CFOP Venda") ; csosn = st.text_input("CSOSN")
+            with colf3:
+                cst_icms = st.text_input("CST ICMS") ; ali_icms = st.number_input("Alíquota ICMS %", 0.0, 100.0, 0.0, 0.01)
+            with colf4:
+                cst_pis = st.text_input("CST PIS") ; ali_pis = st.number_input("Alíquota PIS %", 0.0, 100.0, 0.0, 0.01)
+            colf5, colf6 = st.columns(2)
+            with colf5:
+                cst_cof = st.text_input("CST COFINS") ; ali_cof = st.number_input("Alíquota COFINS %", 0.0, 100.0, 0.0, 0.01)
+            with colf6:
+                iss = st.number_input("ISS % (se serviço)", 0.0, 100.0, 0.0, 0.01)
 
-        new_price = st.number_input("Valor unitário (R$)", min_value=0.0, step=0.01,
-                                    value=cur_price, format="%.2f", key="prec_prod_fiscal_price")
+            colb1, colb2, colb3 = st.columns(3)
+            with colb1:
+                is_sale = st.checkbox("Item de venda", value=True)
+            with colb2:
+                is_ing  = st.checkbox("Ingrediente", value=False)
+            with colb3:
+                markup = st.number_input("Markup padrão %", 0.0, 1000.0, 0.0, 0.1)
 
-        colsave1, colsave2 = st.columns([1,3])
-        with colsave1:
-            save_price = st.button("💾 Salvar valor")
-        if save_price:
-            qexec("update resto.product set sale_price=%s where id=%s;", (float(new_price), pid2))
-            st.success("Valor unitário fiscal salvo.")
-            _rerun()
+            ok = st.form_submit_button("Salvar produto")
 
+        if ok and name and unit_id:
+            cat_id = category_id[0] if isinstance(category_id, tuple) else None
+            uni_id = unit_id[0] if isinstance(unit_id, tuple) else None
+            qexec("""
+                insert into resto.product(code, name, category_id, unit_id, ncm, cest, cfop_venda, csosn, cst_icms, aliquota_icms, cst_pis, aliquota_pis, cst_cofins, aliquota_cofins, iss_aliquota, is_sale_item, is_ingredient, default_markup)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                on conflict (name) do update set
+                  code=excluded.code, category_id=excluded.category_id, unit_id=excluded.unit_id,
+                  ncm=excluded.ncm, cest=excluded.cest, cfop_venda=excluded.cfop_venda, csosn=excluded.csosn,
+                  cst_icms=excluded.cst_icms, aliquota_icms=excluded.aliquota_icms,
+                  cst_pis=excluded.cst_pis, aliquota_pis=excluded.aliquota_pis,
+                  cst_cofins=excluded.cst_cofins, aliquota_cofins=excluded.aliquota_cofins,
+                  iss_aliquota=excluded.iss_aliquota, is_sale_item=excluded.is_sale_item, is_ingredient=excluded.is_ingredient, default_markup=excluded.default_markup;
+            """, (code, name, cat_id, uni_id, ncm, cest, cfop, csosn, cst_icms, ali_icms, cst_pis, ali_pis, cst_cof, ali_cof, iss, is_sale, is_ing, markup))
+            st.success("Produto salvo!")
+
+        prods = qall("select id, code, name, stock_qty, avg_cost, last_cost from resto.product order by name;")
+        st.dataframe(pd.DataFrame(prods), use_container_width=True, hide_index=True)
         card_end()
 
 
