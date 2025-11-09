@@ -600,10 +600,10 @@ def page_cadastros():
             st.caption("Nenhum produto cadastrado.")
         card_end()
 
-# ========================================================== COMPRAS ==========================================================
+#==========================================================COMPRAS===========================================================================
 def page_compras():
     import pandas as pd
-    from datetime import date
+    from datetime import date, timedelta
 
     # ---------------- helpers ----------------
     def _rerun():
@@ -617,7 +617,7 @@ def page_compras():
         qexec("""
         do $$
         begin
-          -- Tabela de compras (cabeçalho)
+          -- Cabeçalho
           create table if not exists resto.purchase(
             id            bigserial primary key,
             supplier_id   bigint not null references resto.supplier(id),
@@ -627,13 +627,28 @@ def page_compras():
             freight_value numeric(14,2) default 0,
             other_costs   numeric(14,2) default 0,
             total         numeric(14,2) default 0,
-            status        text not null default 'RASCUNHO', -- RASCUNHO|LANÇADA|POSTADA|ESTORNADA|CANCELADA
+            status        text not null default 'RASCUNHO',
             posted_at     timestamptz,
             estornado_em  timestamptz,
             created_at    timestamptz default now()
           );
 
-          -- Itens (cada item equivale a um LOTE)
+          -- Se já existe, garante colunas
+          alter table resto.purchase
+            add column if not exists status        text not null default 'RASCUNHO';
+          alter table resto.purchase
+            add column if not exists posted_at     timestamptz;
+          alter table resto.purchase
+            add column if not exists estornado_em  timestamptz;
+
+          begin
+            alter table resto.purchase
+              add constraint purchase_status_chk
+              check (status in ('RASCUNHO','LANÇADA','POSTADA','ESTORNADA','CANCELADA'));
+          exception when duplicate_object then null;
+          end;
+
+          -- Itens
           create table if not exists resto.purchase_item(
             id           bigserial primary key,
             purchase_id  bigint not null references resto.purchase(id) on delete cascade,
@@ -646,361 +661,407 @@ def page_compras():
             lot_number   text,
             expiry_date  date
           );
-
-          -- Check defensivo de status
-          begin
-            alter table resto.purchase
-              add constraint purchase_status_chk
-              check (status in ('RASCUNHO','LANÇADA','POSTADA','ESTORNADA','CANCELADA'));
-          exception when duplicate_object then null;
-          end;
         end $$;
         """)
 
-    def _sp_exists() -> bool:
-        r = qone("""
-          select exists(
-            select 1
-              from pg_proc p
-              join pg_namespace n on n.oid = p.pronamespace
-             where n.nspname = 'resto'
-               and p.proname = 'sp_register_movement'
-          ) as ok;
-        """)
-        return bool(r and r["ok"])
+    def _post_purchase(purchase_id: int):
+        """Gera movimentos de estoque (IN) de todos os itens dessa compra."""
+        items = qall("""
+            select id, product_id, qty, unit_price, coalesce(expiry_date::text,'') as exp
+              from resto.purchase_item
+             where purchase_id=%s;
+        """, (int(purchase_id),)) or []
+        for it in items:
+            note = f"lote:{it['id']}" + (f";exp:{it['exp']}" if it["exp"] else "")
+            # registra IN por lote (reference_id = id do purchase_item)
+            qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'purchase',%s,%s);",
+                  (int(it["product_id"]), float(it["qty"]), float(it["unit_price"]), int(it["id"]), note))
+        qexec("update resto.purchase set status='POSTADA', posted_at=now() where id=%s;", (int(purchase_id),))
 
-    def _register_movement(product_id:int, kind:str, qty:float, unit_cost:float, reason:str, ref_id:int, note:str):
-        """
-        Tenta usar resto.sp_register_movement(prod_id,'IN/OUT',qty,unit_cost,'reason',reference_id,note).
-        Se a função não existir, faz um insert direto em inventory_movement (fallback).
-        """
-        try:
-            qexec("select resto.sp_register_movement(%s,%s,%s,%s,%s,%s,%s);",
-                  (int(product_id), kind, float(qty), float(unit_cost), reason, int(ref_id), note))
-        except Exception as e:
-            # Fallback: cria registro direto (não atualiza CMP/estoque agregado automaticamente)
-            qexec("""
-              insert into resto.inventory_movement(move_date, product_id, kind, qty, unit_cost, total_cost, reason, reference_id, note)
-              values (now(), %s, %s, %s, %s, %s, %s, %s, %s);
-            """, (int(product_id), kind, float(qty), float(unit_cost), float(qty)*float(unit_cost), reason, int(ref_id), note))
+    def _unpost_purchase(purchase_id: int):
+        """Estorna (gera OUT) em todos os itens. Marca ESTORNADA."""
+        items = qall("""
+            select id, product_id, qty, unit_price
+              from resto.purchase_item
+             where purchase_id=%s;
+        """, (int(purchase_id),)) or []
+        for it in items:
+            note = f"revert:purchase:{purchase_id};lot:{it['id']}"
+            qexec("select resto.sp_register_movement(%s,'OUT',%s,%s,'purchase_revert',%s,%s);",
+                  (int(it["product_id"]), float(it["qty"]), float(it["unit_price"]), int(it["id"]), note))
+        qexec("update resto.purchase set status='ESTORNADA', estornado_em=now() where id=%s;", (int(purchase_id),))
 
-    def _money(x):
-        try:
-            return money(x)
-        except Exception:
-            try:
-                v = float(x or 0)
-            except Exception:
-                v = 0.0
-            s = f"R$ {v:,.2f}"
-            return s.replace(",", "X").replace(".", ",").replace("X", ".")
-
-    # ---------------- start ----------------
     _ensure_purchase_schema()
 
-    header("📥 Compras", "Fluxo: Rascunho → Lançada → Postada (estoque) / Estornada.")
-    suppliers = qall("select id, name from resto.supplier order by name;") or []
-    prods     = qall("select id, name, unit_id from resto.product order by name;") or []
-    units     = qall("select id, abbr from resto.unit order by abbr;") or []
+    header("📥 Compras", "Lançar notas, editar/excluir, e postar/estornar no estoque.")
+    tabs = st.tabs(["🧾 Nova compra", "🗂️ Gerenciar compras"])
 
-    sup_opts  = [(s["id"], s["name"]) for s in suppliers]
-    prod_opts = [(p["id"], p["name"]) for p in prods]
-    unit_opts = [(u["id"], u["abbr"]) for u in units]
-    abbr_by_unit = {u["id"]: u["abbr"] for u in units}
+    # ============================== Aba: Nova compra ==============================
+    with tabs[0]:
+        suppliers = qall("select id, name from resto.supplier order by name;") or []
+        prods     = qall("select id, name, unit_id from resto.product order by name;") or []
+        units     = qall("select id, abbr from resto.unit order by abbr;") or []
 
-    # ================ NOVA COMPRA (RASCUNHO/LANÇADA) ================
-    card_start()
-    st.subheader("➕ Nova compra")
+        sup_opts  = [(s['id'], s['name']) for s in suppliers]
+        prod_opts = [(p['id'], p['name']) for p in prods]
+        unit_opts = [(u['id'], u['abbr']) for u in units]
+        unit_idx_by_id = {u['id']: i for i, u in enumerate(units)}  # p/ default do select
 
-    # estado itens
-    st.session_state.setdefault("compra_itens", [])
+        # Estado temporário (lista de itens)
+        st.session_state.setdefault("compra_itens", [])
 
-    with st.form("form_compra"):
-        c1, c2, c3 = st.columns([2,1,1])
-        with c1:
-            supplier = st.selectbox("Fornecedor *", options=sup_opts, format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-        with c2:
-            doc_number = st.text_input("Número do documento")
-        with c3:
-            doc_date = st.date_input("Data", value=date.today())
+        card_start()
+        st.subheader("Cabeçalho")
+        colh1, colh2 = st.columns([2,1])
+        with colh1:
+            supplier = st.selectbox("Fornecedor *", options=sup_opts, format_func=lambda x: x[1] if isinstance(x, tuple) else x, key="comp_sup")
+            doc_number = st.text_input("Número do documento", key="comp_docnum")
+            cfop_ent   = st.text_input("CFOP Entrada", value="1102", key="comp_cfop")
+        with colh2:
+            doc_date   = st.date_input("Data do documento", value=date.today(), key="comp_date")
+            freight    = st.number_input("Frete", 0.00, 9999999.99, 0.00, 0.01, key="comp_frete")
+            other      = st.number_input("Outros custos", 0.00, 9999999.99, 0.00, 0.01, key="comp_outros")
 
-        c4, c5, c6 = st.columns(3)
-        with c4:
-            cfop_ent = st.text_input("CFOP Entrada", value="1102")
-        with c5:
-            freight = st.number_input("Frete", 0.00, 9_999_999.99, 0.00, 0.01, format="%.2f")
-        with c6:
-            other = st.number_input("Outros custos", 0.00, 9_999_999.99, 0.00, 0.01, format="%.2f")
+        st.markdown("### Itens da compra (cada item = **lote**)")
+        with st.expander("➕ Adicionar item", expanded=False):
+            with st.form("form_add_item"):
+                pcol1, pcol2 = st.columns([2,1])
+                with pcol1:
+                    prod = st.selectbox("Produto", options=prod_opts, key="add_prod",
+                                        format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+                with pcol2:
+                    # unidade default do produto (se tiver)
+                    default_unit_index = 0
+                    try:
+                        prow = next((r for r in prods if r["id"] == (prod[0] if isinstance(prod, tuple) else None)), None)
+                        if prow and prow.get("unit_id") in unit_idx_by_id:
+                            default_unit_index = unit_idx_by_id[prow["unit_id"]]
+                    except Exception:
+                        pass
+                    unit = st.selectbox("Unidade", options=unit_opts, index=default_unit_index,
+                                        key="add_unit",
+                                        format_func=lambda x: x[1] if isinstance(x, tuple) else x)
 
-        st.markdown("**Itens da compra (cada item é um LOTE)**")
-        with st.expander("Adicionar item", expanded=True):
-            p1, p2, p3, p4 = st.columns([2,1,1,1])
-            with p1:
-                prod = st.selectbox("Produto", options=prod_opts, key="comp_item_prod",
-                                    format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-            with p2:
-                unit = st.selectbox("Unidade", options=unit_opts, key="comp_item_unit",
-                                    format_func=lambda x: x[1] if isinstance(x, tuple) else x)
-            with p3:
-                qty = st.number_input("Quantidade", 0.000, 1_000_000.0, 1.000, 0.001, key="comp_item_qty", format="%.3f")
-            with p4:
-                unit_price = st.number_input("Preço unitário", 0.00, 1_000_000.0, 0.00, 0.01, key="comp_item_price", format="%.2f")
+                pcol3, pcol4, pcol5 = st.columns([1,1,1])
+                with pcol3:
+                    qty = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1, key="add_qty")
+                with pcol4:
+                    unit_price = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01, key="add_up")
+                with pcol5:
+                    discount = st.number_input("Desconto (valor)", 0.0, 1_000_000.0, 0.0, 0.01, key="add_desc")
 
-            d1, d2, d3 = st.columns([1,1,2])
-            with d1:
-                discount = st.number_input("Desconto", 0.00, 1_000_000.0, 0.00, 0.01, key="comp_item_disc", format="%.2f")
-            with d2:
-                expiry = st.date_input("Validade", value=None, key="comp_item_exp")
-            with d3:
-                lote = st.text_input("Lote (opcional)", key="comp_item_lot")
+                pcol6, pcol7 = st.columns([2,1])
+                with pcol6:
+                    lote = st.text_input("Lote (opcional)", key="add_lote")
+                with pcol7:
+                    exp_flag = st.checkbox("Tem validade?", value=False, key="add_has_exp")
+                expiry = None
+                if exp_flag:
+                    expiry = st.date_input("Validade", value=None, key="add_exp")
 
-            add_item = st.form_submit_button("➕ Adicionar item")
-            if add_item and prod and unit and qty > 0:
-                total = float(qty) * float(unit_price) - float(discount)
+                add_ok = st.form_submit_button("Adicionar item")
+            if add_ok and prod and unit and qty > 0:
+                total = (qty * unit_price) - discount
                 st.session_state["compra_itens"].append({
                     "product_id": prod[0], "product_name": prod[1],
-                    "unit_id": unit[0], "unit_abbr": abbr_by_unit.get(unit[0]),
+                    "unit_id": unit[0], "unit_abbr": unit[1],
                     "qty": float(qty), "unit_price": float(unit_price), "discount": float(discount),
-                    "total": total,
-                    "lot_number": (lote or None),
+                    "total": float(total), "lot_number": (lote or None),
                     "expiry_date": (str(expiry) if expiry else None)
                 })
-                st.success("Item adicionado!")
+                st.success("Item adicionado.")
 
-        # lista de itens atual
         df = pd.DataFrame(st.session_state["compra_itens"]) if st.session_state["compra_itens"] else pd.DataFrame(
-            columns=["product_name","qty","unit_abbr","unit_price","discount","total","expiry_date","lot_number"]
+            columns=["product_name","qty","unit_abbr","unit_price","discount","total","expiry_date"]
         )
-        if not df.empty:
-            st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.caption("Nenhum item adicionado ainda.")
-
+        st.dataframe(df, use_container_width=True, hide_index=True)
         total_doc = float(df["total"].sum()) if not df.empty else 0.0
-        st.markdown(f"**Total itens:** {_money(total_doc)}")
+        st.markdown(f"**Total de itens:** {money(total_doc)}")
 
-        c7, c8 = st.columns(2)
-        with c7:
-            submit_rasc = st.form_submit_button("💾 Salvar RASCUNHO")
-        with c8:
-            submit_lanc = st.form_submit_button("✅ Salvar e marcar como LANÇADA")
+        cbot1, cbot2, cbot3 = st.columns(3)
+        with cbot1:
+            limpar = st.button("🧹 Limpar itens")
+        with cbot2:
+            salvar = st.button("💾 Salvar (status: LANÇADA)")
+        with cbot3:
+            salvar_postar = st.button("🚀 Salvar e POSTAR no estoque")
 
-    card_end()
-
-    if (submit_rasc or submit_lanc):
-        if not supplier:
-            st.error("Selecione um fornecedor.")
+        if limpar:
+            st.session_state["compra_itens"] = []
+            st.info("Lista de itens limpa.")
+            card_end()
             return
-        status = "LANÇADA" if submit_lanc else "RASCUNHO"
-        prow = qone("""
-            insert into resto.purchase(supplier_id, doc_number, cfop_entrada, doc_date, freight_value, other_costs, total, status)
-            values (%s,%s,%s,%s,%s,%s,%s,%s)
-            returning id;
-        """, (int(supplier[0]), doc_number, cfop_ent, doc_date, float(freight), float(other), float(total_doc), status))
-        purchase_id = prow["id"]
 
-        # grava itens
-        for it in st.session_state["compra_itens"]:
-            qone("""
-              insert into resto.purchase_item(
-                purchase_id, product_id, qty, unit_id, unit_price, discount, total, lot_number, expiry_date
-              ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-              returning id;
-            """, (purchase_id, int(it["product_id"]), float(it["qty"]), int(it["unit_id"]),
-                  float(it["unit_price"]), float(it["discount"]), float(it["total"]),
-                  it["lot_number"], it["expiry_date"]))
-        st.session_state["compra_itens"] = []
-        st.success(f"Compra #{purchase_id} salva com status **{status}**.")
-        _rerun()
+        if (salvar or salvar_postar):
+            if not supplier:
+                st.error("Selecione o fornecedor.")
+                card_end(); return
+            if df.empty:
+                st.error("Inclua ao menos 1 item.")
+                card_end(); return
 
-    # ================ LISTAGEM / AÇÕES EM COMPRAS ================
-    card_start()
-    st.subheader("📚 Notas de compra")
-    f1, f2 = st.columns([2,1])
-    with f1:
-        qtxt = st.text_input("Buscar (nº doc, fornecedor)", key="comp_q")
-    with f2:
-        only_open = st.checkbox("Somente não postadas", value=True, key="comp_open")
+            pid = supplier[0]
+            row = qone("""
+                insert into resto.purchase(supplier_id, doc_number, cfop_entrada, doc_date, freight_value, other_costs, total, status)
+                values (%s,%s,%s,%s,%s,%s,%s,'LANÇADA')
+                returning id;
+            """, (int(pid), doc_number, cfop_ent, doc_date, float(freight), float(other), float(total_doc)))
+            purchase_id = row["id"]
 
-    wh = []
-    pr = []
-    if qtxt.strip():
-        wh.append("(lower(coalesce(p.doc_number,'')) like lower(%s) or lower(s.name) like lower(%s))")
-        like = f"%{qtxt.strip()}%"
-        pr += [like, like]
-    if only_open:
-        wh.append("p.status in ('RASCUNHO','LANÇADA')")
+            # itens
+            for it in st.session_state["compra_itens"]:
+                qone("""
+                    insert into resto.purchase_item(
+                      purchase_id, product_id, qty, unit_id, unit_price, discount, total, lot_number, expiry_date
+                    ) values (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    returning id;
+                """, (int(purchase_id), int(it["product_id"]), float(it["qty"]), int(it["unit_id"]),
+                      float(it["unit_price"]), float(it["discount"]), float(it["total"]),
+                      (it["lot_number"] or None), (it["expiry_date"] or None)))
 
-    sql_list = f"""
-      select p.id, p.doc_number, p.doc_date, p.status, p.total, s.name as fornecedor
-        from resto.purchase p
-        join resto.supplier s on s.id = p.supplier_id
-       {"where " + " and ".join(wh) if wh else ""}
-       order by p.id desc
-       limit 200;
-    """
-    rows = qall(sql_list, tuple(pr)) or []
-    dfp = pd.DataFrame(rows)
-    if dfp.empty:
-        st.caption("Nenhuma compra encontrada para os filtros.")
+            if salvar_postar:
+                try:
+                    _post_purchase(purchase_id)
+                except Exception:
+                    st.error("Falha ao postar no estoque (verifique a função resto.sp_register_movement).")
+                    card_end(); return
+
+            st.session_state["compra_itens"] = []
+            st.success(f"Compra #{purchase_id} salva" + (" e **POSTADA** no estoque." if salvar_postar else "."))
+            _rerun()
+
         card_end()
-        return
 
-    dfp["total"] = dfp["total"].map(_money)
-    st.dataframe(dfp, use_container_width=True, hide_index=True)
+    # ============================== Aba: Gerenciar compras ==============================
+    with tabs[1]:
+        card_start()
+        st.subheader("Pesquisar")
 
-    sel_id = st.selectbox("Selecione uma compra para ações", options=[r["id"] for r in rows], key="comp_sel_id")
-    if not sel_id:
-        card_end()
-        return
+        g1, g2, g3, g4 = st.columns([1.2,1,1,1])
+        with g1:
+            dt_ini = st.date_input("De", value=date.today().replace(day=1))
+        with g2:
+            dt_fim = st.date_input("Até", value=date.today())
+        with g3:
+            status_sel = st.multiselect("Status", ["RASCUNHO","LANÇADA","POSTADA","ESTORNADA","CANCELADA"],
+                                        default=["LANÇADA","POSTADA","RASCUNHO"])
+        with g4:
+            sup_f = st.selectbox("Fornecedor (filtro)",
+                                 options=[(0,"— todos —")] + [(s['id'], s['name']) for s in suppliers],
+                                 format_func=lambda x: x[1])
 
-    # Detalhe + ações
-    det = qone("""
-      select p.*, s.name as fornecedor
-        from resto.purchase p
-        join resto.supplier s on s.id = p.supplier_id
-       where p.id=%s;
-    """, (int(sel_id),))
-    items = qall("""
-      select i.id, i.product_id, pr.name as produto, i.qty, i.unit_price, i.discount, i.total, i.lot_number, i.expiry_date
-        from resto.purchase_item i
-        join resto.product pr on pr.id = i.product_id
-       where i.purchase_id=%s
-       order by i.id;
-    """, (int(sel_id),)) or []
+        where = ["p.doc_date between %s and %s"]
+        params = [dt_ini, dt_fim]
+        if status_sel:
+            where.append("p.status = any(%s)")
+            params.append(status_sel)
+        if sup_f and isinstance(sup_f, tuple) and sup_f[0] != 0:
+            where.append("p.supplier_id = %s")
+            params.append(int(sup_f[0]))
 
-    st.markdown(f"**Compra #{sel_id}** • Fornecedor: **{det['fornecedor']}** • Data: {det['doc_date']} • Status: **{det['status']}** • Total: {_money(det['total'])}")
+        sql_list = f"""
+            select p.id, p.doc_date, p.doc_number, p.status, p.total, s.name as supplier
+              from resto.purchase p
+              join resto.supplier s on s.id = p.supplier_id
+             where {' and '.join(where)}
+             order by p.doc_date desc, p.id desc
+             limit 500;
+        """
+        rows = qall(sql_list, tuple(params)) or []
+        df_list = pd.DataFrame(rows)
+        if df_list.empty:
+            st.caption("Nenhuma compra encontrada para os filtros.")
+            card_end(); return
 
-    df_items = pd.DataFrame(items)
-    if not df_items.empty:
-        st.dataframe(df_items, use_container_width=True, hide_index=True)
-    else:
-        st.caption("Compra sem itens.")
+        # seleção
+        sel = st.selectbox("Selecione a compra", options=[(r["id"], f"#{r['id']} • {r['doc_date']} • {r['supplier']} • {r['status']} • {money(r['total'])}") for r in rows],
+                           format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+        if not sel:
+            card_end(); return
 
-    # Ações conforme status
-    col_a, col_b, col_c, col_d = st.columns(4)
+        sel_id = int(sel[0])
+        head = qone("""
+            select p.*, s.name as supplier_name
+              from resto.purchase p
+              join resto.supplier s on s.id = p.supplier_id
+             where p.id=%s;
+        """, (sel_id,))
+        itens = qall("""
+            select pi.id, pi.product_id, pr.name as produto, pi.qty, pi.unit_price, pi.discount, pi.total,
+                   pi.lot_number, pi.expiry_date, u.abbr as un
+              from resto.purchase_item pi
+              join resto.product pr on pr.id = pi.product_id
+              left join resto.unit u on u.id = pi.unit_id
+             where pi.purchase_id=%s
+             order by pi.id;
+        """, (sel_id,)) or []
 
-    can_edit = det["status"] in ("RASCUNHO", "LANÇADA")
-    can_post = det["status"] in ("LANÇADA",)
-    can_estorno = det["status"] == "POSTADA"
+        st.markdown(f"### Compra #{sel_id} – {head['supplier_name']} • **{head['status']}**")
 
-    with col_a:
-        if can_edit and st.button("✏️ Editar cabeçalho"):
-            with st.form(f"form_edit_head_{sel_id}"):
-                e1, e2, e3 = st.columns([2,1,1])
-                with e1:
-                    new_doc = st.text_input("Nº documento", value=det.get("doc_number") or "")
-                with e2:
-                    new_date = st.date_input("Data", value=det["doc_date"])
-                with e3:
-                    new_cfop = st.text_input("CFOP Entrada", value=det.get("cfop_entrada") or "1102")
-                e4, e5 = st.columns(2)
-                with e4:
-                    new_freight = st.number_input("Frete", 0.00, 9_999_999.99, float(det.get("freight_value") or 0), 0.01, format="%.2f")
-                with e5:
-                    new_other = st.number_input("Outros custos", 0.00, 9_999_999.99, float(det.get("other_costs") or 0), 0.01, format="%.2f")
-                ok_head = st.form_submit_button("💾 Salvar cabeçalho")
-            if ok_head:
-                qexec("""
-                  update resto.purchase
-                     set doc_number=%s, doc_date=%s, cfop_entrada=%s, freight_value=%s, other_costs=%s
-                   where id=%s;
-                """, (new_doc, new_date, new_cfop, float(new_freight), float(new_other), int(sel_id)))
-                st.success("Cabeçalho atualizado.")
+        # --------- Header editável (se não POSTADA nem ESTORNADA/CANCELADA)
+        can_edit = head["status"] in ("RASCUNHO","LANÇADA")
+        with st.form(f"form_head_{sel_id}"):
+            hc1, hc2, hc3 = st.columns([2,1,1])
+            with hc1:
+                sup2 = st.selectbox("Fornecedor *", options=sup_opts,
+                                    index=next((i for i, t in enumerate(sup_opts) if t[0]==head["supplier_id"]), 0),
+                                    disabled=not can_edit, key=f"edit_sup_{sel_id}")
+                doc2 = st.text_input("Número do documento", value=head.get("doc_number") or "", disabled=not can_edit, key=f"edit_doc_{sel_id}")
+            with hc2:
+                cf2 = st.text_input("CFOP Entrada", value=head.get("cfop_entrada") or "", disabled=not can_edit, key=f"edit_cfop_{sel_id}")
+                dt2 = st.date_input("Data", value=head.get("doc_date"), disabled=not can_edit, key=f"edit_date_{sel_id}")
+            with hc3:
+                fr2 = st.number_input("Frete", 0.0, 9999999.99, float(head.get("freight_value") or 0.0), 0.01, disabled=not can_edit, key=f"edit_frete_{sel_id}")
+                ot2 = st.number_input("Outros custos", 0.0, 9999999.99, float(head.get("other_costs") or 0.0), 0.01, disabled=not can_edit, key=f"edit_outros_{sel_id}")
+            btn_upd_head = st.form_submit_button("💾 Salvar cabeçalho", disabled=not can_edit)
+
+        if btn_upd_head and can_edit:
+            qexec("""
+                update resto.purchase
+                   set supplier_id=%s, doc_number=%s, cfop_entrada=%s, doc_date=%s,
+                       freight_value=%s, other_costs=%s
+                 where id=%s;
+            """, (int(sup2[0]), doc2, cf2, dt2, float(fr2), float(ot2), sel_id))
+            st.success("Cabeçalho atualizado.")
+            _rerun()
+
+        # --------- Itens (data_editor) – somente se pode editar
+        df_it = pd.DataFrame(itens)
+        if not df_it.empty:
+            df_it["Excluir?"] = False
+            colcfg = {
+                "id":          st.column_config.NumberColumn("ID", disabled=True),
+                "produto":     st.column_config.TextColumn("Produto", disabled=True),
+                "un":          st.column_config.TextColumn("Un", disabled=True),
+                "qty":         st.column_config.NumberColumn("Qtd", step=0.001, format="%.3f", disabled=not can_edit),
+                "unit_price":  st.column_config.NumberColumn("Preço", step=0.01, format="%.4f", disabled=not can_edit),
+                "discount":    st.column_config.NumberColumn("Desc", step=0.01, format="%.2f", disabled=not can_edit),
+                "total":       st.column_config.NumberColumn("Total", step=0.01, format="%.2f", disabled=True),
+                "lot_number":  st.column_config.TextColumn("Lote", disabled=not can_edit),
+                "expiry_date": st.column_config.DateColumn("Validade", disabled=not can_edit),
+                "Excluir?":    st.column_config.CheckboxColumn("Excluir?", help="Marque para remover", disabled=not can_edit),
+            }
+            edited = st.data_editor(
+                df_it[["id","produto","un","qty","unit_price","discount","total","lot_number","expiry_date","Excluir?"]],
+                column_config=colcfg,
+                hide_index=True,
+                num_rows="fixed",
+                key=f"it_editor_{sel_id}",
+                use_container_width=True
+            )
+
+            ia, ib, ic, id_ = st.columns(4)
+            with ia:
+                apply_items = st.button("💾 Salvar alterações (itens)", disabled=not can_edit, key=f"btn_apply_items_{sel_id}")
+            with ib:
+                with st.popover("➕ Adicionar item", disabled=not can_edit):
+                    with st.form(f"form_add_item_exist_{sel_id}"):
+                        nprod = st.selectbox("Produto", options=prod_opts,
+                                             key=f"add_prod_exist_{sel_id}",
+                                             format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+                        nunit = st.selectbox("Unidade", options=unit_opts,
+                                             key=f"add_unit_exist_{sel_id}",
+                                             format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+                        nqty  = st.number_input("Quantidade", 0.0, 1_000_000.0, 1.0, 0.1, key=f"add_qty_exist_{sel_id}")
+                        nup   = st.number_input("Preço unitário", 0.0, 1_000_000.0, 0.0, 0.01, key=f"add_up_exist_{sel_id}")
+                        ndesc = st.number_input("Desconto (valor)", 0.0, 1_000_000.0, 0.0, 0.01, key=f"add_desc_exist_{sel_id}")
+                        nlote = st.text_input("Lote (opcional)", key=f"add_lote_exist_{sel_id}")
+                        nexpF = st.checkbox("Tem validade?", value=False, key=f"add_hasexp_exist_{sel_id}")
+                        nexp  = st.date_input("Validade", value=None, key=f"add_exp_exist_{sel_id}") if nexpF else None
+                        nadd  = st.form_submit_button("Incluir")
+                    if nadd and nprod and nunit and nqty > 0:
+                        ntotal = (nqty * nup) - ndesc
+                        qexec("""
+                            insert into resto.purchase_item
+                                (purchase_id, product_id, qty, unit_id, unit_price, discount, total, lot_number, expiry_date)
+                            values (%s,%s,%s,%s,%s,%s,%s,%s,%s);
+                        """, (sel_id, int(nprod[0]), float(nqty), int(nunit[0]),
+                              float(nup), float(ndesc), float(ntotal), (nlote or None), (str(nexp) if nexpF and nexp else None)))
+                        st.success("Item incluído.")
+                        _rerun()
+            with ic:
+                post_btn = st.button("📦 Postar no estoque", disabled=(head["status"]=="POSTADA"), key=f"btn_post_{sel_id}")
+            with id_:
+                est_btn = st.button("↩️ Estornar", disabled=(head["status"]!="POSTADA"), key=f"btn_est_{sel_id}")
+
+            if apply_items and can_edit:
+                # comparar e aplicar
+                orig = df_it.set_index("id")
+                new  = edited.set_index("id")
+
+                upd = 0; delc = 0; err = 0
+                # deletar
+                to_del = new.index[new["Excluir?"] == True].tolist()
+                for iid in to_del:
+                    try:
+                        qexec("delete from resto.purchase_item where id=%s;", (int(iid),))
+                        delc += 1
+                    except Exception:
+                        err += 1
+
+                # atualizar (recalcula total)
+                keep_ids = [i for i in new.index if i not in to_del]
+                for iid in keep_ids:
+                    a = orig.loc[iid]; b = new.loc[iid]
+                    changed = any(str(a.get(f,"")) != str(b.get(f,"")) for f in
+                                  ["qty","unit_price","discount","lot_number","expiry_date"])
+                    if not changed:
+                        continue
+                    try:
+                        new_total = float(b.get("qty") or 0)*float(b.get("unit_price") or 0) - float(b.get("discount") or 0)
+                        qexec("""
+                            update resto.purchase_item
+                               set qty=%s, unit_price=%s, discount=%s, total=%s, lot_number=%s, expiry_date=%s
+                             where id=%s;
+                        """, (float(b.get("qty") or 0), float(b.get("unit_price") or 0),
+                              float(b.get("discount") or 0), float(new_total),
+                              (b.get("lot_number") or None), (str(b.get("expiry_date")) if b.get("expiry_date") else None),
+                              int(iid)))
+                        upd += 1
+                    except Exception:
+                        err += 1
+
+                # atualiza total do cabeçalho
+                new_total_doc = qone("select coalesce(sum(total),0) s from resto.purchase_item where purchase_id=%s;", (sel_id,))["s"]
+                qexec("update resto.purchase set total=%s where id=%s;", (float(new_total_doc or 0), sel_id))
+
+                st.success(f"Itens: ✅ {upd} atualizado(s) • 🗑️ {delc} removido(s) • ⚠️ {err} erro(s).")
                 _rerun()
 
-    with col_b:
-        if can_edit and st.button("🗂️ Editar itens"):
-            # editor simples: permitir excluir itens e editar qty, price, discount, lot, expiry
-            df_edit = pd.DataFrame(items)
-            if not df_edit.empty:
-                df_edit["Excluir?"] = False
-                cfg = {
-                    "id": st.column_config.NumberColumn("ID", disabled=True),
-                    "produto": st.column_config.TextColumn("Produto", disabled=True),
-                    "qty": st.column_config.NumberColumn("Qtd", step=0.001, format="%.3f"),
-                    "unit_price": st.column_config.NumberColumn("Preço", step=0.01, format="%.2f"),
-                    "discount": st.column_config.NumberColumn("Desc", step=0.01, format="%.2f"),
-                    "lot_number": st.column_config.TextColumn("Lote"),
-                    "expiry_date": st.column_config.DateColumn("Validade"),
-                    "total": st.column_config.NumberColumn("Total", step=0.01, format="%.2f", disabled=True),
-                    "Excluir?": st.column_config.CheckboxColumn("Excluir?")
-                }
-                edited = st.data_editor(df_edit, column_config=cfg, hide_index=True, num_rows="fixed", key=f"edit_items_{sel_id}", use_container_width=True)
-                if st.button("💾 Salvar alterações dos itens"):
-                    orig = df_edit.set_index("id")
-                    new  = edited.set_index("id")
-                    upd = 0; delc = 0; err = 0
-                    to_del = new.index[new["Excluir?"] == True].tolist()
-                    for iid in to_del:
-                        try:
-                            qexec("delete from resto.purchase_item where id=%s;", (int(iid),))
-                            delc += 1
-                        except Exception:
-                            err += 1
-                    keep = [i for i in new.index if i not in to_del]
-                    for iid in keep:
-                        a = orig.loc[iid]; b = new.loc[iid]
-                        changed = any(str(a.get(f,"")) != str(b.get(f,"")) for f in ["qty","unit_price","discount","lot_number","expiry_date"])
-                        if not changed:
-                            continue
-                        try:
-                            tot = float(b["qty"])*float(b["unit_price"]) - float(b["discount"])
-                            qexec("""
-                              update resto.purchase_item
-                                 set qty=%s, unit_price=%s, discount=%s, total=%s, lot_number=%s, expiry_date=%s
-                               where id=%s;
-                            """, (float(b["qty"]), float(b["unit_price"]), float(b["discount"]), tot, b.get("lot_number"), b.get("expiry_date"), int(iid)))
-                            upd += 1
-                        except Exception:
-                            err += 1
-                    # recalc total da compra
-                    newtot = qone("select coalesce(sum(total),0) t from resto.purchase_item where purchase_id=%s;", (int(sel_id),))["t"]
-                    qexec("update resto.purchase set total=%s where id=%s;", (float(newtot), int(sel_id)))
-                    st.success(f"Itens: ✅ {upd} atualizado(s) • 🗑️ {delc} excluído(s) • ⚠️ {err} erro(s).")
+            if post_btn and head["status"] != "POSTADA":
+                try:
+                    _post_purchase(sel_id)
+                    st.success("Compra postada no estoque.")
                     _rerun()
+                except Exception:
+                    st.error("Não foi possível postar. Verifique a função `resto.sp_register_movement`.")
 
-    with col_c:
-        if can_post and st.button("📦 Postar no estoque"):
-            # gera movimentos IN para cada item
-            its = qall("select * from resto.purchase_item where purchase_id=%s order by id;", (int(sel_id),)) or []
-            for it in its:
-                note = f"lote:{it['id']}" + (f";exp:{it['expiry_date']}" if it.get("expiry_date") else "")
-                _register_movement(product_id=int(it["product_id"]),
-                                   kind='IN',
-                                   qty=float(it["qty"]),
-                                   unit_cost=float(it["unit_price"]),
-                                   reason='purchase',
-                                   ref_id=int(it["id"]),
-                                   note=note)
-            qexec("update resto.purchase set status='POSTADA', posted_at=now() where id=%s;", (int(sel_id),))
-            st.success("Compra postada e estoque atualizado.")
+            if est_btn and head["status"] == "POSTADA":
+                _unpost_purchase(sel_id)
+                st.success("Compra estornada (estoque revertido).")
+                _rerun()
+
+        # --------- Excluir / Cancelar
+        st.divider()
+        d1, d2 = st.columns(2)
+        with d1:
+            can_delete = head["status"] in ("RASCUNHO","LANÇADA")
+            del_btn = st.button("🗑️ Excluir compra (não postada)", disabled=not can_delete, type="secondary", key=f"btn_del_{sel_id}")
+        with d2:
+            can_cancel = head["status"] in ("RASCUNHO","LANÇADA")
+            cancel_btn = st.button("🚫 Cancelar (mantém registro, sem afetar estoque)", disabled=not can_cancel, key=f"btn_cancel_{sel_id}")
+
+        if del_btn and can_delete:
+            qexec("delete from resto.purchase where id=%s;", (sel_id,))
+            st.success("Compra excluída.")
             _rerun()
 
-    with col_d:
-        if can_estorno and st.button("↩️ Estornar"):
-            # movimento reverso (OUT) para cada item postado
-            its = qall("select * from resto.purchase_item where purchase_id=%s order by id;", (int(sel_id),)) or []
-            for it in its:
-                note = f"estorno de lote:{it['id']}"
-                _register_movement(product_id=int(it["product_id"]),
-                                   kind='OUT',
-                                   qty=float(it["qty"]),
-                                   unit_cost=float(it["unit_price"]),
-                                   reason='purchase_revert',
-                                   ref_id=int(it["id"]),
-                                   note=note)
-            qexec("update resto.purchase set status='ESTORNADA', estornado_em=now() where id=%s;", (int(sel_id),))
-            st.success("Estorno realizado.")
+        if cancel_btn and can_cancel:
+            qexec("update resto.purchase set status='CANCELADA' where id=%s;", (sel_id,))
+            st.info("Compra cancelada.")
             _rerun()
 
-    # Excluir compra inteira (apenas se não postada)
-    if det["status"] in ("RASCUNHO","LANÇADA") and st.button("🗑️ Excluir compra"):
-        qexec("delete from resto.purchase where id=%s;", (int(sel_id),))
-        st.success("Compra excluída.")
-        _rerun()
-
-    card_end()
+        card_end()
 
 
 #=====================================VENDAS =================================================================================
