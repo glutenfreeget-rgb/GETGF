@@ -2342,20 +2342,40 @@ def page_financeiro():
         end $$;
         """)
 
-    def _ensure_cash_category(kind: str, name: str) -> int:
-        """Garante e retorna id de uma categoria de caixa."""
-        r = qone("""
-            with upsert as (
-              insert into resto.cash_category(kind, name)
-              values (%s,%s)
-              on conflict (kind, name) do update set name=excluded.name
-              returning id
-            )
-            select id from upsert
-            union all
-            select id from resto.cash_category where kind=%s and name=%s limit 1;
-        """, (kind, name, kind, name))
+# helper robusto: garante a categoria no banco e retorna o id
+def _ensure_cash_category(kind: str, name: str) -> int:
+    # 1) tenta achar
+    r = qone("select id from resto.cash_category where kind=%s and name=%s;", (kind, name))
+    if r:
         return int(r["id"])
+
+    # 2) tenta inserir usando conflito Só por 'name' (compatível com seu schema atual)
+    try:
+        r = qone("""
+            insert into resto.cash_category(name, kind)
+            values (%s, %s)
+            on conflict (name) do nothing
+            returning id;
+        """, (name, kind))
+        if r and r.get("id"):
+            return int(r["id"])
+    except Exception:
+        pass
+
+    # 3) busca novamente (ou se o PG não suportar returning naquele on conflict)
+    r = qone("select id from resto.cash_category where kind=%s and name=%s;", (kind, name))
+    if r:
+        return int(r["id"])
+
+    # 4) última tentativa sem returning (para máxima compatibilidade)
+    qexec("""
+        insert into resto.cash_category(name, kind)
+        values (%s, %s)
+        on conflict (name) do nothing;
+    """, (name, kind))
+    r = qone("select id from resto.cash_category where kind=%s and name=%s;", (kind, name))
+    return int((r or {}).get("id") or 0)
+
 
 
     def _record_cashbook(kind: str, category_id: int, entry_date, description: str, amount: float, method: str):
