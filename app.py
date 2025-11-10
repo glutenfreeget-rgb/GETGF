@@ -2321,8 +2321,56 @@ def page_financeiro():
         except Exception:
             pass
 
+    # ---------- helpers estruturais novos (não quebram nada) ----------
+    def _ensure_payable_schema():
+        qexec("""
+        do $$
+        begin
+          create table if not exists resto.payable (
+            id          bigserial primary key,
+            purchase_id bigint references resto.purchase(id) on delete cascade,
+            supplier_id bigint not null references resto.supplier(id),
+            due_date    date not null,
+            amount      numeric(14,2) not null,
+            status      text not null default 'ABERTO',  -- ABERTO | PAGO | CANCELADO
+            paid_at     date,
+            method      text,
+            category_id bigint references resto.cash_category(id),
+            note        text
+          );
+          create index if not exists payable_status_idx on resto.payable(status);
+        end $$;
+        """)
+
+    def _ensure_cash_category(kind: str, name: str) -> int:
+        """Garante e retorna id de uma categoria de caixa."""
+        r = qone("""
+            with upsert as (
+              insert into resto.cash_category(kind, name)
+              values (%s,%s)
+              on conflict (kind, name) do update set name=excluded.name
+              returning id
+            )
+            select id from upsert
+            union all
+            select id from resto.cash_category where kind=%s and name=%s limit 1;
+        """, (kind, name, kind, name))
+        return int(r["id"])
+
+    def _record_cashbook(kind: str, category_id: int, entry_date, description: str, amount: float, method: str):
+        qexec("""
+            insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
+            values (%s, %s, %s, %s, %s, %s);
+        """, (entry_date, kind, int(category_id), description, float(amount), method))
+
+    # garante estruturas de "a pagar"
+    _ensure_payable_schema()
+
     header("💰 Financeiro", "Entradas, Saídas e DRE.")
-    tabs = st.tabs(["💸 Entradas", "💳 Saídas", "📈 DRE", "⚙️ Gestão", "📊 Painel", "📆 Comparativo"])
+    # ADIÇÃO: mantive as 6 abas existentes e acrescentei a nova '🧾 A Pagar' no final
+    tabs = st.tabs([
+        "💸 Entradas", "💳 Saídas", "📈 DRE", "⚙️ Gestão", "📊 Painel", "📆 Comparativo", "🧾 A Pagar"
+    ])
 
     METHODS = ['— todas —', 'dinheiro', 'pix', 'cartão débito', 'cartão crédito', 'boleto', 'transferência', 'outro']
 
@@ -2813,6 +2861,201 @@ def page_financeiro():
                 st.caption("Sem lançamentos no período/critério selecionado.")
 
         card_end()
+
+    # ---------- Aba: 🧾 A Pagar (NOVO, sem mexer nas outras abas) ----------
+    with tabs[6]:
+        card_start()
+        st.subheader("🧾 Contas a Pagar (compras → caixa)")
+
+        # seção: gerar títulos a pagar a partir de compras POSTADAS sem título
+        st.markdown("#### Gerar título a partir de compra postada")
+        compras_sem_titulo = qall("""
+            select p.id, s.name as fornecedor, p.doc_date,
+                   coalesce((select sum(total) from resto.purchase_item where purchase_id=p.id),0)
+                   + coalesce(p.freight_value,0) + coalesce(p.other_costs,0) as total
+              from resto.purchase p
+              join resto.supplier s on s.id = p.supplier_id
+             where p.status = 'POSTADA'
+               and not exists (select 1 from resto.payable x where x.purchase_id = p.id and x.status <> 'CANCELADO')
+             order by p.doc_date desc, p.id desc
+             limit 200;
+        """) or []
+
+        if compras_sem_titulo:
+            opt = st.selectbox(
+                "Compra postada (sem título)",
+                options=[(r["id"], f"#{r['id']} • {r['fornecedor']} • {r['doc_date']} • {money(float(r['total']))}") for r in compras_sem_titulo],
+                format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+                key="apagar_comp_sel"
+            )
+            if opt:
+                comp_row = next((r for r in compras_sem_titulo if r["id"] == opt[0]), None)
+                with st.form("form_gerar_payable"):
+                    col1, col2, col3 = st.columns([1,1,2])
+                    with col1:
+                        due = st.date_input("Vencimento", value=date.today())
+                    with col2:
+                        valor = st.number_input("Valor do título", min_value=0.01, step=0.01, value=float(comp_row["total"]), format="%.2f")
+                    with col3:
+                        note = st.text_input("Observação", value=f"Compra #{comp_row['id']} - {comp_row['fornecedor']}")
+                    ok = st.form_submit_button("➕ Gerar título (A Pagar)")
+                if ok:
+                    # resolve supplier_id
+                    sid = qone("select supplier_id from resto.purchase where id=%s;", (int(comp_row["id"]),))["supplier_id"]
+                    qexec("""
+                        insert into resto.payable(purchase_id, supplier_id, due_date, amount, status, note)
+                        values (%s,%s,%s,%s,'ABERTO',%s);
+                    """, (int(comp_row["id"]), int(sid), due, float(valor), note or None))
+                    st.success("Título gerado.")
+                    _rerun()
+        else:
+            st.caption("Não há compras POSTADAS sem título de pagamento.")
+
+        st.divider()
+        st.markdown("#### Títulos em aberto")
+
+        # filtros simples
+        f1, f2 = st.columns(2)
+        with f1:
+            so_vencidos = st.checkbox("Somente vencidos", value=False)
+        with f2:
+            dt_ref = st.date_input("Considerar vencidos até", value=date.today())
+
+        wh = ["status='ABERTO'"]
+        pr = []
+        if so_vencidos:
+            wh.append("due_date <= %s")
+            pr.append(dt_ref)
+
+        rows_open = qall(f"""
+            select p.id, p.purchase_id, p.supplier_id, s.name as fornecedor,
+                   p.due_date, p.amount, coalesce(p.note,'') as note
+              from resto.payable p
+              join resto.supplier s on s.id = p.supplier_id
+             where {' and '.join(wh)}
+             order by p.due_date asc, p.id asc;
+        """, tuple(pr)) or []
+
+        df_open = pd.DataFrame(rows_open)
+        if df_open.empty:
+            st.caption("Nenhum título em aberto para os filtros.")
+            card_end()
+            return
+
+        # edição leve + marcar ações
+        df_open["Pagar?"] = False
+        df_open["Excluir?"] = False
+        cfg = {
+            "id":          st.column_config.NumberColumn("ID", disabled=True),
+            "purchase_id": st.column_config.NumberColumn("Compra", disabled=True),
+            "fornecedor":  st.column_config.TextColumn("Fornecedor", disabled=True),
+            "due_date":    st.column_config.DateColumn("Vencimento"),
+            "amount":      st.column_config.NumberColumn("Valor", step=0.01, format="%.2f"),
+            "note":        st.column_config.TextColumn("Observação"),
+            "Pagar?":      st.column_config.CheckboxColumn("Pagar agora?"),
+            "Excluir?":    st.column_config.CheckboxColumn("Excluir?"),
+        }
+
+        edited_open = st.data_editor(
+            df_open[["id","purchase_id","fornecedor","due_date","amount","note","Pagar?","Excluir?"]],
+            column_config=cfg,
+            hide_index=True,
+            num_rows="fixed",
+            use_container_width=True,
+            key="payable_editor"
+        )
+
+        st.markdown("##### Baixa em lote / Ações")
+        colx1, colx2, colx3, colx4 = st.columns([1,1,1,2])
+        with colx1:
+            dt_pag = st.date_input("Data de pagamento", value=date.today(), key="pay_dt")
+        with colx2:
+            metodo_pag = st.selectbox("Método", METHODS[1:], key="pay_method")  # sem '— todas —'
+        with colx3:
+            # categoria padrão Compras/Estoque
+            cat_out_default = _ensure_cash_category('OUT', 'Compras/Estoque')
+            # permitir trocar (se quiser usar outra)
+            cats_out = qall("select id, name from resto.cash_category where kind='OUT' order by name;") or []
+            # manter default como primeira opção visível
+            cats_ordered = sorted(cats_out, key=lambda r: (0 if r["id"] == cat_out_default else 1, r["name"]))
+            cat_sel = st.selectbox("Categoria (saída)", options=[(r["id"], r["name"]) for r in cats_ordered],
+                                   format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+                                   key="pay_cat")
+        with colx4:
+            do_pay = st.button("💸 Pagar selecionados")
+        coly1, coly2 = st.columns([1,1])
+        with coly1:
+            do_save = st.button("💾 Salvar alterações (datas/valores/observação)")
+        with coly2:
+            do_del = st.button("🗑️ Excluir selecionados")
+
+        # ações
+        if do_save:
+            orig = df_open.set_index("id")
+            new  = edited_open.set_index("id")
+            upd = 0; err = 0
+            for pid in new.index.tolist():
+                a = orig.loc[pid]; b = new.loc[pid]
+                if any(str(a.get(f,"")) != str(b.get(f,"")) for f in ["due_date","amount","note"]):
+                    try:
+                        qexec("""
+                            update resto.payable
+                               set due_date=%s, amount=%s, note=%s
+                             where id=%s and status='ABERTO';
+                        """, (b["due_date"], float(b["amount"]), (b.get("note") or None), int(pid)))
+                        upd += 1
+                    except Exception:
+                        err += 1
+            st.success(f"✅ {upd} título(s) atualizado(s) • ⚠️ {err} erro(s)")
+            _rerun()
+
+        if do_del:
+            new = edited_open.set_index("id")
+            ids = new.index[new["Excluir?"] == True].tolist()
+            ok, bad = 0, 0
+            for pid in ids:
+                try:
+                    qexec("update resto.payable set status='CANCELADO' where id=%s and status='ABERTO';", (int(pid),))
+                    ok += 1
+                except Exception:
+                    bad += 1
+            st.success(f"🗑️ {ok} título(s) cancelado(s) • ⚠️ {bad} erro(s)")
+            _rerun()
+
+        if do_pay:
+            new = edited_open.set_index("id")
+            ids = new.index[new["Pagar?"] == True].tolist()
+            if not ids:
+                st.warning("Selecione pelo menos um título para pagar.")
+            else:
+                cat_id = int(cat_sel[0]) if isinstance(cat_sel, tuple) else cat_out_default
+                ok, bad = 0, 0
+                for pid in ids:
+                    try:
+                        row = qone("""
+                            select p.id, p.amount, p.note, s.name fornecedor
+                              from resto.payable p
+                              join resto.supplier s on s.id = p.supplier_id
+                             where p.id=%s and p.status='ABERTO';
+                        """, (int(pid),))
+                        if not row:
+                            bad += 1
+                            continue
+                        desc = f"Pagamento título #{pid} – {row['fornecedor']}"
+                        _record_cashbook('OUT', cat_id, dt_pag, desc, float(row["amount"]), metodo_pag)
+                        qexec("""
+                            update resto.payable
+                               set status='PAGO', paid_at=%s, method=%s, category_id=%s
+                             where id=%s;
+                        """, (dt_pag, metodo_pag, cat_id, int(pid)))
+                        ok += 1
+                    except Exception:
+                        bad += 1
+                st.success(f"💸 {ok} pago(s) • ⚠️ {bad} com erro")
+                _rerun()
+
+        card_end()
+
 
 
 # ===================== Importar Extrato (CSV C6 / genérico) =====================
