@@ -256,7 +256,11 @@ def header(title: str, subtitle: str = "", logo: str | None = None, logo_height:
     html.append('</div></div>')
 
     st.markdown("".join(html), unsafe_allow_html=True)
+def card_start(): st.markdown("<div class='modern-card'>", unsafe_allow_html=True)
+def card_end():   st.markdown("</div>", unsafe_allow_html=True)
 
+def money(v: float) -> str:
+    return ("R$ {:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", ".")
 # ===================== Domain Helpers =====================
 def lot_balances_for_product(product_id: int) -> pd.DataFrame:
     """Retorna saldos por lote (purchase_item) para um produto.
@@ -3388,7 +3392,8 @@ def main():
     if not ensure_ping():
         st.stop()
     ensure_migrations()
-
+    
+    #header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")
     header(
                 "🍝 SISTEMA DE GESTÃO GET GLUTEN FREE",
                 "Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa",
