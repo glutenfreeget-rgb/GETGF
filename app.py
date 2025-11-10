@@ -3401,7 +3401,7 @@ def main():
     header(
             " SISTEMA DE GESTÃO GET GLUTEN FREE",
             "Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa",
-            logo="img/logo8.png",       # caminho local no repo (ou)
+            logo="img/logoget8.png",       # caminho local no repo (ou)
             # logo="https://seu-dominio.com/logo.png",  # URL externa
             logo_height=92
         )
