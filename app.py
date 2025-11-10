@@ -3395,15 +3395,16 @@ def page_importar_extrato():
 def main():
     if not ensure_ping():
         st.stop()
-        header(
+
+    ensure_migrations()
+
+     header(
         "SISTEMA DE GESTÃO GET GLUTEN FREE",
         "Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa",
         logo="img/logoget8.png",       # caminho local no repo (ou)
         # logo="https://seu-dominio.com/logo.png",  # URL externa
         logo_height=92
     )
-    ensure_migrations()
-    
     #header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")
 
 
