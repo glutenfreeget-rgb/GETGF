@@ -170,6 +170,37 @@ def _money_br(v):
         v = 0.0
     return ("R$ {:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", ".")
 
+# --- Helpers (colocar no topo da page_compras) ---
+def _ensure_cash_category_compras() -> int:
+    r = qone("""
+        with upsert as (
+          insert into resto.cash_category(kind, name)
+          values ('OUT','Compras/Estoque')
+          on conflict (kind, name) do update set name=excluded.name
+          returning id
+        )
+        select id from upsert
+        union all
+        select id from resto.cash_category where kind='OUT' and name='Compras/Estoque' limit 1;
+    """)
+    return int(r["id"])
+
+def _record_cashbook_out_from_purchase(purchase_id: int, method: str, entry_date):
+    head = qone("""
+        select p.id, p.doc_date, coalesce(p.freight_value,0) frete, coalesce(p.other_costs,0) outros, s.name fornecedor
+          from resto.purchase p
+          join resto.supplier s on s.id = p.supplier_id
+         where p.id=%s;
+    """, (int(purchase_id),))
+    tot_itens = qone("select coalesce(sum(total),0) s from resto.purchase_item where purchase_id=%s;", (int(purchase_id),))["s"]
+    total = float(tot_itens) + float(head["frete"]) + float(head["outros"])
+    cat_id = _ensure_cash_category_compras()
+    desc = f"Compra #{purchase_id} – {head['fornecedor']}"
+    qexec("""
+        insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
+        values (%s,'OUT',%s,%s,%s,%s);
+    """, (entry_date, cat_id, desc, total, method))
+
 # ===================== UI Helpers =====================
 def header(title: str, subtitle: Optional[str] = None):
     st.markdown(
