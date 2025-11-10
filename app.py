@@ -261,6 +261,57 @@ def card_end():   st.markdown("</div>", unsafe_allow_html=True)
 
 def money(v: float) -> str:
     return ("R$ {:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", ".")
+
+def brandbar(logo_url: str, title: str, subtitle: str, brand_h: int = 96, logo_h: int = 80):
+    """
+    brand_h  = altura da faixa (em px)
+    logo_h   = altura da logo (em px)
+    """
+    import streamlit as st
+    st.markdown(f"""
+    <style>
+      .brandbar {{
+        --brandbar-h: {brand_h}px;
+        --logo-h: {logo_h}px;
+      }}
+      .brandbar-wrap {{ margin: -20px -1rem 12px -1rem; }}
+      .brandbar-bg {{
+        height: var(--brandbar-h);
+        background: linear-gradient(90deg,#0f172a 0%, #1e293b 45%, #0ea5e9 100%);
+        border-radius: 12px;
+        box-shadow: 0 8px 24px rgba(0,0,0,.18);
+        border: 1px solid rgba(255,255,255,.06);
+      }}
+      .brandbar-inner {{
+        height: var(--brandbar-h);
+        display: flex; align-items: center; gap: 16px;
+        padding: 0 18px;
+      }}
+      .brandbar-logo {{
+        height: var(--logo-h);
+        width: auto;
+        filter: drop-shadow(0 2px 8px rgba(0,0,0,.25));
+      }}
+      .brandbar-title {{ color:#fff; font-weight:700; 
+        font-size: clamp(18px, 2.2vw, 28px); line-height:1.15; }}
+      .brandbar-sub {{ color:#e5e7eb; font-size: 13px; margin-top: 2px; }}
+      @media (max-width: 820px) {{
+        .brandbar {{ --brandbar-h: {max(64, brand_h-20)}px; --logo-h: {max(48, logo_h-20)}px; }}
+      }}
+    </style>
+    <div class="brandbar brandbar-wrap">
+      <div class="brandbar-bg">
+        <div class="brandbar-inner">
+          <img class="brandbar-logo" src="{logo_url}" alt="logo">
+          <div>
+            <div class="brandbar-title">{title}</div>
+            <div class="brandbar-sub">{subtitle}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
 # ===================== Domain Helpers =====================
 def lot_balances_for_product(product_id: int) -> pd.DataFrame:
     """Retorna saldos por lote (purchase_item) para um produto.
@@ -3401,7 +3452,15 @@ def main():
                 # logo="https://seu-dominio.com/logo.png",  # URL externa
                 logo_height=56
             )
+    LOGO = "img/logoget8.png"
 
+    brandbar(
+        logo_url=LOGO,
+        title="🍝 SISTEMA DE GESTÃO GET GLUTEN FREE",
+        subtitle="Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa",
+        brand_h=110,   # << aumente aqui a faixa
+        logo_h=92      # << e aqui a altura da logo
+    )
     page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro", "Importar Extrato"], index=0)
 
     if page == "Painel": page_dashboard()
