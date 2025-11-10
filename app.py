@@ -202,18 +202,60 @@ def _record_cashbook_out_from_purchase(purchase_id: int, method: str, entry_date
     """, (entry_date, cat_id, desc, total, method))
 
 # ===================== UI Helpers =====================
-def header(title: str, subtitle: Optional[str] = None):
-    st.markdown(
-        f"<div class='modern-header'><h2 style='margin:0'>{title}</h2>" +
-        (f"<div class='muted'>{subtitle}</div>" if subtitle else "") +
-        "</div>", unsafe_allow_html=True
-    )
+def header(title: str, subtitle: str = "", logo: str | None = None, logo_height: int = 56):
+    import base64, mimetypes, os
 
-def card_start(): st.markdown("<div class='modern-card'>", unsafe_allow_html=True)
-def card_end():   st.markdown("</div>", unsafe_allow_html=True)
+    # injeta CSS uma única vez
+    if not st.session_state.get("_hdr_css_loaded"):
+        st.markdown("""
+        <style>
+          .hdr-band{
+            background: linear-gradient(135deg,#111827 0%,#1f2937 45%,#374151 100%);
+            color:#fff; border-radius:14px; padding:14px 18px; margin:8px 0 18px 0;
+            display:flex; align-items:center; gap:14px;
+            box-shadow: 0 6px 24px rgba(0,0,0,.15);
+          }
+          .hdr-band .hdr-logo{
+            display:block; border-radius:10px;
+          }
+          .hdr-band .hdr-txt h1{
+            margin:0; font-weight:700; letter-spacing:.2px; line-height:1.2;
+            font-size:clamp(18px,2.2vw,24px);
+          }
+          .hdr-band .hdr-txt p{
+            margin:2px 0 0 0; opacity:.9; font-size:clamp(12px,1.6vw,14px);
+          }
+        </style>
+        """, unsafe_allow_html=True)
+        st.session_state["_hdr_css_loaded"] = True
 
-def money(v: float) -> str:
-    return ("R$ {:,.2f}".format(v)).replace(",", "X").replace(".", ",").replace("X", ".")
+    # converte arquivo local para data URI (se for caminho e existir)
+    def _as_src(img: str) -> str:
+        if not img:
+            return ""
+        if img.startswith("http://") or img.startswith("https://") or img.startswith("data:"):
+            return img
+        if os.path.exists(img):
+            mime, _ = mimetypes.guess_type(img)
+            with open(img, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("ascii")
+            return f"data:{mime or 'image/png'};base64,{b64}"
+        # fallback: retorna como veio (caso seja um caminho estático servido por você)
+        return img
+
+    logo_src = _as_src(logo) if logo else ""
+
+    # monta HTML
+    html = ['<div class="hdr-band">']
+    if logo_src:
+        html.append(f'<img class="hdr-logo" src="{logo_src}" alt="logo" height="{logo_height}">')
+    html.append('<div class="hdr-txt">')
+    html.append(f'<h1>{title}</h1>')
+    if subtitle:
+        html.append(f'<p>{subtitle}</p>')
+    html.append('</div></div>')
+
+    st.markdown("".join(html), unsafe_allow_html=True)
 
 # ===================== Domain Helpers =====================
 def lot_balances_for_product(product_id: int) -> pd.DataFrame:
@@ -3347,7 +3389,14 @@ def main():
         st.stop()
     ensure_migrations()
 
-    header("🍝 SISTEMA DE GESTÃO GET GLUTEN FREE", "Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa")
+    header(
+                "🍝 SISTEMA DE GESTÃO GET GLUTEN FREE",
+                "Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa",
+                logo="static/getgf-logo.png",       # caminho local no repo (ou)
+                # logo="https://seu-dominio.com/logo.png",  # URL externa
+                logo_height=56
+            )
+
     page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro", "Importar Extrato"], index=0)
 
     if page == "Painel": page_dashboard()
