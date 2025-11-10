@@ -3397,18 +3397,7 @@ def main():
         st.stop()
     ensure_migrations()
 
-    # sua logo (URL pública, caminho /app/static/logo.png, ou base64 data-URI)
-    LOGO = "https://.../sua_logo.png"
-
-    brandbar(
-        logo_url=LOGO,
-        title="🍝 SISTEMA DE GESTÃO GET GLUTEN FREE",
-        subtitle="Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa",
-        brand_h=110,   # << aumente aqui a faixa
-        logo_h=92      # << e aqui a altura da logo
-    )
-
-
+    header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")
     page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro", "Importar Extrato"], index=0)
 
     if page == "Painel": page_dashboard()
