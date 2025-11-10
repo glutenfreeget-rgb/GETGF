@@ -3397,7 +3397,14 @@ def main():
         st.stop()
     ensure_migrations()
 
-    header(" Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")
+       header(
+        "🍝 SISTEMA DE GESTÃO GET GLUTEN FREE",
+        "Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa",
+        logo="img/logo8.png",       # caminho local no repo (ou)
+        # logo="https://seu-dominio.com/logo.png",  # URL externa
+        logo_height=56
+    )
+
     page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro", "Importar Extrato"], index=0)
 
     if page == "Painel": page_dashboard()
