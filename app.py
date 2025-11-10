@@ -3395,7 +3395,7 @@ def main():
     
     #header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")
     header(
-                "🍝 SISTEMA DE GESTÃO GET GLUTEN FREE",
+                "SISTEMA DE GESTÃO GET GLUTEN FREE",
                 "Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa",
                 logo="img/logoget8.png",       # caminho local no repo (ou)
                 # logo="https://seu-dominio.com/logo.png",  # URL externa
