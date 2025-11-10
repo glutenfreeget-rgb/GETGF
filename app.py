@@ -3,13 +3,7 @@ import os
 from datetime import date, time
 from typing import Any, Dict, List, Optional, Tuple
 
-    header(
-        "SISTEMA DE GESTÃO GET GLUTEN FREE",
-        "Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa",
-        logo="img/logoget8.png",       # caminho local no repo (ou)
-        # logo="https://seu-dominio.com/logo.png",  # URL externa
-        logo_height=92
-    )
+
 # ===================== HELPER: inferir método pela descrição =====================
 def _guess_method_from_desc(desc: str) -> str:
     d = (str(desc) if desc is not None else "").upper()
@@ -235,7 +229,13 @@ def header(title: str, subtitle: str = "", logo: str | None = None, logo_height:
         </style>
         """, unsafe_allow_html=True)
         st.session_state["_hdr_css_loaded"] = True
-
+    header(
+        "SISTEMA DE GESTÃO GET GLUTEN FREE",
+        "Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa",
+        logo="img/logoget8.png",       # caminho local no repo (ou)
+        # logo="https://seu-dominio.com/logo.png",  # URL externa
+        logo_height=92
+    )
     # converte arquivo local para data URI (se for caminho e existir)
     def _as_src(img: str) -> str:
         if not img:
