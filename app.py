@@ -229,13 +229,7 @@ def header(title: str, subtitle: str = "", logo: str | None = None, logo_height:
         </style>
         """, unsafe_allow_html=True)
         st.session_state["_hdr_css_loaded"] = True
-    header(
-        "SISTEMA DE GESTÃO GET GLUTEN FREE",
-        "Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa",
-        logo="img/logoget8.png",       # caminho local no repo (ou)
-        # logo="https://seu-dominio.com/logo.png",  # URL externa
-        logo_height=92
-    )
+
     # converte arquivo local para data URI (se for caminho e existir)
     def _as_src(img: str) -> str:
         if not img:
@@ -3401,6 +3395,13 @@ def page_importar_extrato():
 def main():
     if not ensure_ping():
         st.stop()
+        header(
+        "SISTEMA DE GESTÃO GET GLUTEN FREE",
+        "Financeiro • Fiscal • Estoque • Ficha técnica • Preços • Produção • DRE • Livro Caixa",
+        logo="img/logoget8.png",       # caminho local no repo (ou)
+        # logo="https://seu-dominio.com/logo.png",  # URL externa
+        logo_height=92
+    )
     ensure_migrations()
     
     #header("🍝 Restô ERP Lite", "Financeiro • Fiscal-ready • Estoque • Ficha técnica • Preços • Produção")
