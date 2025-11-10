@@ -2342,47 +2342,20 @@ def page_financeiro():
         end $$;
         """)
 
-def _ensure_cash_category(kind: str, name: str) -> int:
-    """Garante e retorna o id de uma categoria no livro-caixa.
-       Funciona mesmo que ainda não exista índice único (cria-o)."""
-    # garante tabela + índice único (colunas usadas no ON CONFLICT)
-    qexec("""
-    do $$
-    begin
-      if not exists (
-        select 1 from information_schema.tables
-        where table_schema='resto' and table_name='cash_category'
-      ) then
-        create table resto.cash_category (
-          id   bigserial primary key,
-          kind text not null,      -- 'IN' ou 'OUT'
-          name text not null
-        );
-      end if;
-    end $$;
-    """)
-    # índice único para habilitar ON CONFLICT (evita duplicados)
-    qexec("create unique index if not exists cash_category_kind_name_uq on resto.cash_category(kind, name);")
-
-    # tenta localizar
-    r = qone("select id from resto.cash_category where kind=%s and name=%s limit 1;", (kind, name))
-    if r and r.get("id"):
+    def _ensure_cash_category(kind: str, name: str) -> int:
+        """Garante e retorna id de uma categoria de caixa."""
+        r = qone("""
+            with upsert as (
+              insert into resto.cash_category(kind, name)
+              values (%s,%s)
+              on conflict (kind, name) do update set name=excluded.name
+              returning id
+            )
+            select id from upsert
+            union all
+            select id from resto.cash_category where kind=%s and name=%s limit 1;
+        """, (kind, name, kind, name))
         return int(r["id"])
-
-    # tenta upsert (agora já existe unique index)
-    try:
-        r2 = qone("""
-            insert into resto.cash_category(kind, name)
-            values (%s, %s)
-            on conflict (kind, name) do update set name = excluded.name
-            returning id;
-        """, (kind, name))
-        return int(r2["id"])
-    except Exception:
-        # fallback ultra-defensivo (em ambientes bem antigos)
-        qexec("insert into resto.cash_category(kind, name) values (%s, %s);", (kind, name))
-        r3 = qone("select id from resto.cash_category where kind=%s and name=%s limit 1;", (kind, name))
-        return int(r3["id"])
 
 
     def _record_cashbook(kind: str, category_id: int, entry_date, description: str, amount: float, method: str):
