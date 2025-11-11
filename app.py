@@ -2,6 +2,7 @@
 import os
 from datetime import date, time
 from typing import Any, Dict, List, Optional, Tuple
+import re
 
 
 # ===================== HELPER: inferir método pela descrição =====================
@@ -463,12 +464,24 @@ def page_cadastros():
             email= st.text_input("Email")
             phone= st.text_input("Telefone")
             ok = st.form_submit_button("Salvar fornecedor")
-        if ok and name:
-            qexec("""
-                insert into resto.supplier(name, cnpj, ie, email, phone)
-                values (%s,%s,%s,%s,%s);
-            """, (name, cnpj, ie, email, phone))
-            st.success("Fornecedor salvo!")
+            
+            if ok and name:
+                # normalizações leves para evitar sujeira
+                _name  = (name or "").strip()
+                _cnpj  = re.sub(r"\D", "", cnpj or "") or None   # só dígitos
+                _ie    = (ie or "").strip() or None
+                _email = (email or "").strip() or None
+                _phone = re.sub(r"\D", "", phone or "") or None  # só dígitos
+            
+                try:
+                    qexec("""
+                        insert into resto.supplier(name, cnpj, ie, email, phone)
+                        values (%s,%s,%s,%s,%s);
+                    """, (_name, _cnpj, _ie, _email, _phone))
+                    st.success("Fornecedor salvo!")
+                except Exception as e:
+                    st.error("Não foi possível salvar o fornecedor. Verifique os dados (nome obrigatório).")
+
         rows = qall("select id, name, cnpj, ie, email, phone from resto.supplier order by name;")
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         card_end()
