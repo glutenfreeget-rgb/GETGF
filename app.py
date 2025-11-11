@@ -211,7 +211,7 @@ def header(title: str, subtitle: str = "", logo: str | None = None, logo_height:
         st.markdown("""
         <style>
           .hdr-band{
-            background: linear-gradient(135deg,#111827 0%,#1f2937 45%,#374151 100%);
+            background: linear-gradient(135deg,#654321 0%,#1f2937 45%,#374151 100%);
             color:#fff; border-radius:14px; padding:14px 18px; margin:8px 0 18px 0;
             display:flex; align-items:center; gap:14px;
             box-shadow: 0 6px 24px rgba(0,0,0,.15);
