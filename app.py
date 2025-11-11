@@ -2354,6 +2354,9 @@ def page_estoque():
 
 # ===================== FINANCEIRO =====================
 def page_financeiro():
+
+    import pandas as pd  # <- FIX: usado em _run_grid, DRE, Painel, Comparativo
+    
     # helper p/ recarregar sem depender do nome antigo
     def _rerun():
         try:
