@@ -205,48 +205,38 @@ def _record_cashbook_out_from_purchase(purchase_id: int, method: str, entry_date
 # ===================== UI Helpers =====================
 def header(title: str, subtitle: str = "", logo: str | None = None, logo_height: int = 56):
     import base64, mimetypes, os
+    # injeta o CSS SEM usar session_state (injeta a cada rerun)
+    st.markdown("""
+    <style>
+      .hdr-band{
+        background: linear-gradient(135deg,#654321 0%,#654321 45%,#654321 100%);
+        color:#fff; border-radius:14px; padding:14px 18px; margin:8px 0 18px 0;
+        display:flex; align-items:center; gap:14px;
+        box-shadow: 0 6px 24px rgba(0,0,0,.15);
+      }
+      .hdr-band .hdr-logo{ display:block; border-radius:10px; }
+      .hdr-band .hdr-txt h1{
+        margin:0; font-weight:700; letter-spacing:.2px; line-height:1.2;
+        font-size:clamp(18px,2.2vw,24px);
+      }
+      .hdr-band .hdr-txt p{
+        margin:2px 0 0 0; opacity:.9; font-size:clamp(12px,1.6vw,14px);
+      }
+    </style>
+    """, unsafe_allow_html=True)
 
-    # injeta CSS uma única vez
-    if not st.session_state.get("_hdr_css_loaded"):
-        st.markdown("""
-        <style>
-          .hdr-band{
-            background: linear-gradient(135deg,#654321 0%,#1f2937 45%,#374151 100%);
-            color:#fff; border-radius:14px; padding:14px 18px; margin:8px 0 18px 0;
-            display:flex; align-items:center; gap:14px;
-            box-shadow: 0 6px 24px rgba(0,0,0,.15);
-          }
-          .hdr-band .hdr-logo{
-            display:block; border-radius:10px;
-          }
-          .hdr-band .hdr-txt h1{
-            margin:0; font-weight:700; letter-spacing:.2px; line-height:1.2;
-            font-size:clamp(18px,2.2vw,24px);
-          }
-          .hdr-band .hdr-txt p{
-            margin:2px 0 0 0; opacity:.9; font-size:clamp(12px,1.6vw,14px);
-          }
-        </style>
-        """, unsafe_allow_html=True)
-        st.session_state["_hdr_css_loaded"] = True
-
-    # converte arquivo local para data URI (se for caminho e existir)
     def _as_src(img: str) -> str:
-        if not img:
-            return ""
-        if img.startswith("http://") or img.startswith("https://") or img.startswith("data:"):
+        if not img: return ""
+        if img.startswith(("http://","https://","data:")):
             return img
         if os.path.exists(img):
             mime, _ = mimetypes.guess_type(img)
             with open(img, "rb") as f:
                 b64 = base64.b64encode(f.read()).decode("ascii")
             return f"data:{mime or 'image/png'};base64,{b64}"
-        # fallback: retorna como veio (caso seja um caminho estático servido por você)
         return img
 
     logo_src = _as_src(logo) if logo else ""
-
-    # monta HTML
     html = ['<div class="hdr-band">']
     if logo_src:
         html.append(f'<img class="hdr-logo" src="{logo_src}" alt="logo" height="{logo_height}">')
@@ -255,8 +245,8 @@ def header(title: str, subtitle: str = "", logo: str | None = None, logo_height:
     if subtitle:
         html.append(f'<p>{subtitle}</p>')
     html.append('</div></div>')
-
     st.markdown("".join(html), unsafe_allow_html=True)
+
 def card_start(): st.markdown("<div class='modern-card'>", unsafe_allow_html=True)
 def card_end():   st.markdown("</div>", unsafe_allow_html=True)
 
