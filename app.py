@@ -2488,16 +2488,20 @@ def page_financeiro():
     with tabs[1]:
         _run_grid("OUT", "out", "📤 Saídas")
 
-    # ---------- Aba: DRE ----------
+    # ---------- Aba: DRE (grid bonito) ----------
     with tabs[2]:
         card_start()
         st.subheader("DRE (período)")
+
         d1, d2 = st.columns(2)
         with d1:
             dre_ini = st.date_input("De", value=date.today().replace(day=1), key="dre_dtini")
         with d2:
             dre_fim = st.date_input("Até", value=date.today(), key="dre_dtfim")
 
+        # Calcula DRE (tenta completo; se não, fallback p/ livro-caixa)
+        v = c = d = o = 0.0  # receita, cmv, despesas, outras receitas
+        detalhamento = "Completo (vendas + CMV + livro-caixa)"
         try:
             dt_end_next = dre_fim + timedelta(days=1)
             dre = qone("""
@@ -2531,33 +2535,72 @@ def page_financeiro():
                   from vendas, cmv, caixa_desp, caixa_outros;
             """, (dre_ini, dt_end_next, dre_ini, dt_end_next, dre_ini, dt_end_next, dre_ini, dt_end_next))
             if dre:
-                st.markdown(
-                    f"**Receita (vendas):** {money(dre['v'])}  \n"
-                    f"**CMV:** {money(dre['c'])}  \n"
-                    f"**Despesas (livro-caixa):** {money(dre['d'])}  \n"
-                    f"**Outras receitas (livro-caixa):** {money(dre['o'])}  \n"
-                    f"### **Resultado:** {money(dre['resultado'])}"
-                )
+                v = float(dre["v"] or 0)
+                c = float(dre["c"] or 0)
+                d = float(dre["d"] or 0)
+                o = float(dre["o"] or 0)
             else:
-                raise RuntimeError("Sem dados")
+                raise RuntimeError("sem dados")
         except Exception:
-            tot_in = qone("""
+            # fallback simplificado (apenas livro-caixa)
+            detalhamento = "Simplificado (somente livro-caixa)"
+            v = float(qone("""
                 select coalesce(sum(amount),0) s
                   from resto.cashbook
                  where kind='IN' and entry_date between %s and %s
-            """, (dre_ini, dre_fim))["s"]
-            tot_out = qone("""
+            """, (dre_ini, dre_fim))["s"] or 0)
+            d = float(qone("""
                 select coalesce(sum(amount),0) s
                   from resto.cashbook
                  where kind='OUT' and entry_date between %s and %s
-            """, (dre_ini, dre_fim))["s"]
-            st.warning("DRE simplificada usando apenas o livro-caixa (tabelas de vendas/CMV não encontradas).")
-            st.markdown(
-                f"**Entradas:** {money(tot_in)}  \n"
-                f"**Saídas:** {money(tot_out)}  \n"
-                f"### **Resultado:** {money(tot_in - tot_out)}"
-            )
+            """, (dre_ini, dre_fim))["s"] or 0)
+            c = 0.0
+            o = 0.0
+
+        resultado = v + o - c - d
+
+        # Métricas no topo
+        k1, k2, k3, k4 = st.columns(4)
+        with k1: st.metric("Receita (vendas)",  money(v))
+        with k2: st.metric("CMV",                money(c))
+        with k3: st.metric("Despesas (caixa)",  money(d))
+        with k4: st.metric("Resultado",         money(resultado))
+
+        # Monta GRID (valores negativos para itens que subtraem)
+        import pandas as pd
+        linhas = [
+            {"Conta": "Receita de Vendas",                   "Valor (R$)": v,        "Observação": ""},
+            {"Conta": "(-) CMV",                             "Valor (R$)": -c,       "Observação": "Custo dos produtos vendidos"},
+            {"Conta": "(-) Despesas (Livro-Caixa)",          "Valor (R$)": -d,       "Observação": ""},
+            {"Conta": "(+) Outras Receitas (Livro-Caixa)",   "Valor (R$)": o,        "Observação": ""},
+            {"Conta": "Resultado do Período",                "Valor (R$)": resultado,"Observação": detalhamento},
+        ]
+
+        df_dre = pd.DataFrame(linhas)
+        # Participação % sobre Receita (quando houver receita > 0)
+        part = []
+        for val in df_dre["Valor (R$)"]:
+            if v != 0:
+                part.append((val / v) * 100.0)
+            else:
+                part.append(None)
+        df_dre["Participação % s/ Receita"] = part
+
+        # Exibição com column_config (formatação amigável)
+        colcfg = {
+            "Conta": st.column_config.TextColumn("Conta"),
+            "Valor (R$)": st.column_config.NumberColumn("Valor (R$)", format="%.2f"),
+            "Participação % s/ Receita": st.column_config.NumberColumn("Part. %", format="%.2f"),
+            "Observação": st.column_config.TextColumn("Observação"),
+        }
+        st.dataframe(df_dre, use_container_width=True, hide_index=True, column_config=colcfg)
+
+        # Download
+        csv = df_dre.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Exportar CSV (DRE)", data=csv, file_name="dre_periodo.csv", mime="text/csv")
+
         card_end()
+
 
     # ---------- Aba: Gestão (Filtros + Grid editável) ----------
     with tabs[3]:
