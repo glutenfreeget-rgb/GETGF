@@ -1536,15 +1536,16 @@ def page_producao():
     prod_row = next((r for r in prods if r["id"] == prod_id), {"unit": "un", "last_cost": 0})
 
     tabs = st.tabs(["🛠️ Nova produção", "📜 Ficha técnica (receita)"])
+    
 
-# ==================== Aba Ficha Técnica (FORMULÁRIO ÚNICO) ====================
+# ==================== Aba Ficha Técnica (FORMULÁRIO ÚNICO, sem 'return') ====================
 with tabs[1]:
     import pandas as pd
 
     card_start()
     st.subheader("📄 Ficha técnica do produto — cadastro simplificado")
 
-    # --- helper local: existe coluna yield_unit_id? (compatível com seus dois esquemas)
+    # helper: checa coluna yield_unit_id
     def _has_yield_unit_col() -> bool:
         r = qone("""
             select exists(
@@ -1559,34 +1560,29 @@ with tabs[1]:
 
     has_yield_unit = _has_yield_unit_col()
 
-    # --- dados base
+    # dados base
     units_rows = qall("select id, abbr from resto.unit order by abbr;") or []
     abbr_by_id = {u["id"]: u["abbr"] for u in units_rows}
     id_by_abbr = {u["abbr"]: u["id"] for u in units_rows}
 
-    # ingredientes possíveis (todos os produtos ativos, exceto o próprio produto final)
+    # ingredientes possíveis (exceto o próprio produto final)
     ing_all = [(p["id"], p["name"]) for p in prods if p["id"] != prod_id]
     name_by_id = {i: n for i, n in ing_all}
     id_by_name = {n: i for i, n in ing_all}
 
-    # carrega receita (se já existir)
+    # receita atual (se houver)
     recipe = qone("select * from resto.recipe where product_id=%s;", (prod_id,))
-
-    # valores iniciais do cabeçalho
     init_yield = float(recipe.get("yield_qty") if recipe else 1.0)
     init_over  = float(recipe.get("overhead_pct") if recipe else 0.0)
     init_loss  = float(recipe.get("loss_pct") if recipe else 0.0)
     init_note  = recipe.get("note") if recipe else ""
     init_yunit_id = recipe.get("yield_unit_id") if (recipe and has_yield_unit) else None
 
-    # ingredientes atuais (se existir receita)
+    # ingredientes atuais
     ing_rows = []
     if recipe:
         ing_rows = qall("""
-            select ri.id,
-                   p.name  as ingrediente,
-                   ri.qty,
-                   ri.unit_id,
+            select ri.id, p.name as ingrediente, ri.qty, ri.unit_id,
                    coalesce(ri.conversion_factor, 1.0) as conversion_factor
               from resto.recipe_item ri
               join resto.product p on p.id = ri.ingredient_id
@@ -1594,35 +1590,30 @@ with tabs[1]:
              order by p.name;
         """, (recipe["id"],)) or []
 
-    # dataframe base do grid
     def _df_base():
         if ing_rows:
             df = pd.DataFrame(ing_rows)
             df["Un"] = df["unit_id"].map(abbr_by_id).fillna("")
             df["Excluir?"] = False
             return df[["id", "ingrediente", "qty", "Un", "conversion_factor", "Excluir?"]]
-        # se ainda não tem ingredientes, mostra linha em branco para guiar
         return pd.DataFrame([{
             "id": None, "ingrediente": "", "qty": 0.0, "Un": "", "conversion_factor": 1.0, "Excluir?": False
         }], columns=["id","ingrediente","qty","Un","conversion_factor","Excluir?"])
 
     df_grid = _df_base()
 
-    # ---------------------- FORMULÁRIO ÚNICO ----------------------
+    # ---------- FORMULÁRIO ÚNICO ----------
     with st.form(f"form_recipe_full_{prod_id}"):
-        # parâmetros
         col1, col2, col3, col4 = st.columns([1.2, 1, 1, 2])
         with col1:
             r_yield = st.number_input("Rendimento (quantidade)", min_value=0.001, step=0.001,
                                       value=float(init_yield), format="%.3f")
         with col2:
             r_over  = st.number_input("Overhead (%)", min_value=0.0, step=0.5,
-                                      value=float(init_over),  format="%.2f",
-                                      help="Custos indiretos do lote (gás, energia, MO, etc.).")
+                                      value=float(init_over),  format="%.2f")
         with col3:
             r_loss  = st.number_input("Perdas (%)",   min_value=0.0, step=0.5,
-                                      value=float(init_loss),  format="%.2f",
-                                      help="Rendimento/encolhimento e perdas do processo.")
+                                      value=float(init_loss),  format="%.2f")
         with col4:
             r_unit_sel = None
             if has_yield_unit:
@@ -1637,145 +1628,128 @@ with tabs[1]:
         note = st.text_area("Observações (opcional)", value=(init_note or ""), height=70)
 
         st.markdown("#### Ingredientes (adicione/edite/remova no grid)")
-        # grid único — permite inclusão de linhas (+), edição e marcação para exclusão
         cfg_ing = {
             "id":  st.column_config.TextColumn("ID", disabled=True),
             "ingrediente": st.column_config.SelectboxColumn(
-                "Ingrediente", options=[n for _, n in ing_all],
-                help="Escolha pelo nome. (O sistema mapeia para o ID automaticamente.)"
+                "Ingrediente", options=[n for _, n in ing_all]
             ),
             "qty": st.column_config.NumberColumn("Qtd", step=0.001, format="%.3f"),
             "Un":  st.column_config.SelectboxColumn("Un.", options=[""] + [u["abbr"] for u in units_rows]),
-            "conversion_factor": st.column_config.NumberColumn("Fator conv.", step=0.01, format="%.2f",
-                help="Multiplica a quantidade (ex.: perdas pré-processo, limpeza, etc.)"),
-            "Excluir?": st.column_config.CheckboxColumn("Excluir?", help="Marque para remover este ingrediente")
+            "conversion_factor": st.column_config.NumberColumn("Fator conv.", step=0.01, format="%.2f"),
+            "Excluir?": st.column_config.CheckboxColumn("Excluir?"),
         }
-
         edited = st.data_editor(
             df_grid,
             column_config=cfg_ing,
             hide_index=True,
-            num_rows="dynamic",            # permite adicionar novas linhas
+            num_rows="dynamic",
             use_container_width=True,
             key=f"ft_editor_{prod_id}"
         )
 
         salvar = st.form_submit_button("💾 Salvar ficha técnica")
 
-    # ---------------------- PROCESSAMENTO DO SALVAMENTO ----------------------
+    # ---------- SALVAMENTO (sem return/st.stop) ----------
     if salvar:
-        # validações simples
         if has_yield_unit and not r_unit_sel:
             st.error("Selecione a **unidade do rendimento**.")
-            card_end()
-            st.stop()
-
-        # cria/atualiza a receita
-        if not recipe:
-            # INSERT
-            if has_yield_unit:
-                recipe = qone("""
-                    insert into resto.recipe(product_id, yield_qty, yield_unit_id, overhead_pct, loss_pct, note)
-                    values (%s,%s,%s,%s,%s,%s)
-                    returning *;
-                """, (prod_id, float(r_yield), int(r_unit_sel[0]), float(r_over), float(r_loss), (note or None)))
+            salvar = False  # não prossegue
+        if salvar:
+            # cria/atualiza recipe
+            if not recipe:
+                if has_yield_unit:
+                    recipe = qone("""
+                        insert into resto.recipe(product_id, yield_qty, yield_unit_id, overhead_pct, loss_pct, note)
+                        values (%s,%s,%s,%s,%s,%s)
+                        returning *;
+                    """, (prod_id, float(r_yield), int(r_unit_sel[0]), float(r_over), float(r_loss), (note or None)))
+                else:
+                    recipe = qone("""
+                        insert into resto.recipe(product_id, yield_qty, overhead_pct, loss_pct, note)
+                        values (%s,%s,%s,%s,%s)
+                        returning *;
+                    """, (prod_id, float(r_yield), float(r_over), float(r_loss), (note or None)))
             else:
-                recipe = qone("""
-                    insert into resto.recipe(product_id, yield_qty, overhead_pct, loss_pct, note)
-                    values (%s,%s,%s,%s,%s)
-                    returning *;
-                """, (prod_id, float(r_yield), float(r_over), float(r_loss), (note or None)))
-        else:
-            # UPDATE
-            if has_yield_unit:
-                qexec("""
-                    update resto.recipe
-                       set yield_qty=%s, yield_unit_id=%s, overhead_pct=%s, loss_pct=%s, note=%s, updated_at=now()
-                     where id=%s;
-                """, (float(r_yield), int(r_unit_sel[0]) if r_unit_sel else recipe.get("yield_unit_id"),
-                      float(r_over), float(r_loss), (note or None), int(recipe["id"])))
-            else:
-                qexec("""
-                    update resto.recipe
-                       set yield_qty=%s, overhead_pct=%s, loss_pct=%s, note=%s, updated_at=now()
-                     where id=%s;
-                """, (float(r_yield), float(r_over), float(r_loss), (note or None), int(recipe["id"])))
+                if has_yield_unit:
+                    qexec("""
+                        update resto.recipe
+                           set yield_qty=%s, yield_unit_id=%s, overhead_pct=%s, loss_pct=%s, note=%s, updated_at=now()
+                         where id=%s;
+                    """, (float(r_yield), int(r_unit_sel[0]) if r_unit_sel else recipe.get("yield_unit_id"),
+                          float(r_over), float(r_loss), (note or None), int(recipe["id"])))
+                else:
+                    qexec("""
+                        update resto.recipe
+                           set yield_qty=%s, overhead_pct=%s, loss_pct=%s, note=%s, updated_at=now()
+                         where id=%s;
+                    """, (float(r_yield), float(r_over), float(r_loss), (note or None), int(recipe["id"])))
 
-        rid = int(recipe["id"])
+            rid = int(recipe["id"])
 
-        # ingredientes: comparar original x editado
-        df_orig = _df_base()
-        orig_ids = set([int(i) for i in df_orig["id"].dropna().tolist() if str(i).strip() != ""])
-        # normaliza editado
-        if edited is None or edited.empty:
-            edited = pd.DataFrame(columns=["id","ingrediente","qty","Un","conversion_factor","Excluir?"])
-        edited = edited.fillna({"id":"", "ingrediente":"", "qty":0.0, "Un":"", "conversion_factor":1.0, "Excluir?":False})
-        # ids presentes após edição
-        new_ids = set([int(i) for i in edited["id"].tolist() if str(i).strip().isdigit()])
+            # normaliza grid
+            if edited is None or edited.empty:
+                edited = pd.DataFrame(columns=["id","ingrediente","qty","Un","conversion_factor","Excluir?"])
+            edited = edited.fillna({"id":"", "ingrediente":"", "qty":0.0, "Un":"", "conversion_factor":1.0, "Excluir?":False})
 
-        # 1) deletados por remoção de linha (sumiram do grid)
-        missing_ids = orig_ids - new_ids
-        for _id in missing_ids:
-            try:
-                qexec("delete from resto.recipe_item where id=%s;", (int(_id),))
-            except Exception:
-                pass
-
-        # 2) percorrer linhas do grid (delete marcados / update / insert)
-        upd = ins = dele = err = 0
-        for _, row in edited.iterrows():
-            _id   = str(row.get("id") or "").strip()
-            nome  = (row.get("ingrediente") or "").strip()
-            qty   = float(row.get("qty") or 0.0)
-            unabr = (row.get("Un") or "").strip()
-            conv  = float(row.get("conversion_factor") or 1.0)
-            ex    = bool(row.get("Excluir?") or False)
-
-            # pula linhas totalmente vazias
-            if not _id and not nome:
-                continue
-
-            # mapear ingrediente
-            ing_id = id_by_name.get(nome)
-            unit_id = id_by_abbr.get(unabr) if unabr else None
-
-            if _id and ex:
-                # marcar para exclusão
+            # itens originais (p/ detectar removidos por “sumir do grid”)
+            df_orig = _df_base()
+            orig_ids = set([int(i) for i in df_orig["id"].dropna().tolist() if str(i).strip() != ""])
+            new_ids  = set([int(i) for i in edited["id"].tolist() if str(i).strip().isdigit()])
+            missing_ids = orig_ids - new_ids
+            for _id in missing_ids:
                 try:
                     qexec("delete from resto.recipe_item where id=%s;", (int(_id),))
-                    dele += 1
+                except Exception:
+                    pass
+
+            # insere/atualiza/deleta marcados
+            upd = ins = dele = err = 0
+            for _, row in edited.iterrows():
+                _id   = str(row.get("id") or "").strip()
+                nome  = (row.get("ingrediente") or "").strip()
+                qty   = float(row.get("qty") or 0.0)
+                unabr = (row.get("Un") or "").strip()
+                conv  = float(row.get("conversion_factor") or 1.0)
+                ex    = bool(row.get("Excluir?") or False)
+
+                if not _id and not nome:
+                    continue
+
+                ing_id = id_by_name.get(nome)
+                unit_id = id_by_abbr.get(unabr) if unabr else None
+
+                if _id and ex:
+                    try:
+                        qexec("delete from resto.recipe_item where id=%s;", (int(_id),))
+                        dele += 1
+                    except Exception:
+                        err += 1
+                    continue
+
+                if not nome or qty <= 0:
+                    continue
+
+                try:
+                    if _id:
+                        qexec("""
+                            update resto.recipe_item
+                               set ingredient_id=%s, qty=%s, unit_id=%s, conversion_factor=%s
+                             where id=%s;
+                        """, (int(ing_id), float(qty), unit_id, float(conv), int(_id)))
+                        upd += 1
+                    else:
+                        qexec("""
+                            insert into resto.recipe_item(recipe_id, ingredient_id, qty, unit_id, conversion_factor)
+                            values (%s,%s,%s,%s,%s);
+                        """, (rid, int(ing_id), float(qty), unit_id, float(conv)))
+                        ins += 1
                 except Exception:
                     err += 1
-                continue
 
-            if not nome or qty <= 0:
-                # dados insuficientes para manter/inserir
-                continue
+            st.success(f"Ficha técnica salva. ✅ {upd} atualizado(s) • ➕ {ins} incluído(s) • 🗑️ {dele} removido(s) • ⚠️ {err} erro(s).")
+            st.experimental_rerun()
 
-            try:
-                if _id:
-                    # UPDATE
-                    qexec("""
-                        update resto.recipe_item
-                           set ingredient_id=%s, qty=%s, unit_id=%s, conversion_factor=%s
-                         where id=%s;
-                    """, (int(ing_id), float(qty), unit_id, float(conv), int(_id)))
-                    upd += 1
-                else:
-                    # INSERT
-                    qexec("""
-                        insert into resto.recipe_item(recipe_id, ingredient_id, qty, unit_id, conversion_factor)
-                        values (%s,%s,%s,%s,%s);
-                    """, (rid, int(ing_id), float(qty), unit_id, float(conv)))
-                    ins += 1
-            except Exception:
-                err += 1
-
-        st.success(f"Ficha técnica salva. ✅ {upd} atualizado(s) • ➕ {ins} incluído(s) • 🗑️ {dele} removido(s) • ⚠️ {err} erro(s).")
-        st.experimental_rerun()
-
-    # ---------------------- Estimativa de custo (exibição) ----------------------
-    # (recalcula a cada render para manter o usuário informado)
+    # ---------- Estimativa de custo (exibição) ----------
     if recipe:
         cost_rows = qall("""
             select ri.qty, coalesce(ri.conversion_factor,1) as conversion_factor, coalesce(p.last_cost,0) as last_cost
@@ -1796,7 +1770,6 @@ with tabs[1]:
             yq = float(recipe.get("yield_qty") or 1.0)
             unit_cost = batch_cost / (yq if yq > 0 else 1.0)
 
-            # texto do rendimento (com unidade se houver)
             ytxt = f"{yq:.3f}"
             if has_yield_unit:
                 yabbr = ""
@@ -1808,7 +1781,7 @@ with tabs[1]:
                 if yabbr:
                     ytxt = f"{yq:.3f} {yabbr}"
 
-            st.info(f"💡 **Estimativa de custo por unidade:** {money(unit_cost)}  —  **Custo do lote:** {money(batch_cost)}  —  **Rendimento:** {ytxt}")
+            st.info(f"💡 **Custo unitário estimado:** {money(unit_cost)}  —  **Custo do lote:** {money(batch_cost)}  —  **Rendimento:** {ytxt}")
 
     card_end()
 
