@@ -3447,39 +3447,79 @@ def page_agenda_contas():
 
     # ---------- helpers defensivos ----------
     def _rerun():
-        try: st.rerun()
+        try:
+            st.rerun()
         except Exception:
-            try: st.experimental_rerun()
-            except Exception: pass
+            try:
+                st.experimental_rerun()
+            except Exception:
+                pass
 
     def _ensure_payable_schema():
+        # ALTERADO: cria/ajusta tabela de forma defensiva e relaxa NOT NULL dos campos opcionais
         qexec("""
         do $$
         begin
-          create table if not exists resto.payable (
-            id          bigserial primary key,
-            purchase_id bigint references resto.purchase(id) on delete cascade,
-            supplier_id bigint not null references resto.supplier(id),
-            due_date    date not null,
-            amount      numeric(14,2) not null,
-            status      text not null default 'ABERTO',  -- ABERTO | PAGO | CANCELADO
-            paid_at     date,
-            method      text,
-            category_id bigint references resto.cash_category(id),
-            note        text
-          );
-          create index if not exists payable_status_idx on resto.payable(status);
+          if to_regclass('resto.payable') is null then
+            create table resto.payable (
+              id          bigserial primary key,
+              purchase_id bigint references resto.purchase(id) on delete cascade,
+              supplier_id bigint not null references resto.supplier(id),
+              due_date    date not null,
+              amount      numeric(14,2) not null,
+              status      text not null default 'ABERTO',  -- ABERTO | PAGO | CANCELADO
+              paid_at     date,
+              method      text,
+              category_id bigint references resto.cash_category(id),
+              note        text
+            );
+          else
+            -- garante colunas (sem quebrar se já existirem)
+            begin
+              alter table resto.payable add column if not exists purchase_id bigint references resto.purchase(id) on delete cascade;
+              alter table resto.payable add column if not exists supplier_id bigint;
+              alter table resto.payable add column if not exists due_date date;
+              alter table resto.payable add column if not exists amount numeric(14,2);
+              alter table resto.payable add column if not exists status text;
+              alter table resto.payable add column if not exists paid_at date;
+              alter table resto.payable add column if not exists method text;
+              alter table resto.payable add column if not exists category_id bigint references resto.cash_category(id);
+              alter table resto.payable add column if not exists note text;
+            exception when others then null; end;
+
+            -- relaxa NOT NULL de campos opcionais (se existirem)
+            begin alter table resto.payable alter column purchase_id drop not null; exception when others then null; end;
+            begin alter table resto.payable alter column method      drop not null; exception when others then null; end;
+            begin alter table resto.payable alter column category_id drop not null; exception when others then null; end;
+            begin alter table resto.payable alter column note        drop not null; exception when others then null; end;
+
+            -- garante NOT NULL nos essenciais e default de status
+            begin alter table resto.payable alter column supplier_id set not null; exception when others then null; end;
+            begin alter table resto.payable alter column due_date    set not null; exception when others then null; end;
+            begin alter table resto.payable alter column amount      set not null; exception when others then null; end;
+            begin alter table resto.payable alter column status      set not null; exception when others then null; end;
+            begin alter table resto.payable alter column status      set default 'ABERTO'; exception when others then null; end;
+          end if;
+
+          -- índices úteis
+          create index if not exists payable_status_idx  on resto.payable(status);
           create index if not exists payable_duedate_idx on resto.payable(due_date);
         end $$;
         """)
 
     def _ensure_cash_category(kind: str, name: str) -> int:
+        # upsert seguro mesmo sem unique criado previamente
         r = qone("""
-            insert into resto.cash_category(kind, name)
-            values (%s,%s)
-            on conflict (kind, name) do update set name=excluded.name
-            returning id;
-        """, (kind, name))
+            with ins as (
+              insert into resto.cash_category(kind, name)
+              values (%s,%s)
+              on conflict (kind, name) do update set name=excluded.name
+              returning id
+            )
+            select id from ins
+            union all
+            select id from resto.cash_category where kind=%s and name=%s limit 1;
+        """, (kind, name, kind, name))
         return int(r["id"])
 
     def _record_cashbook(kind: str, category_id: int, entry_date, description: str, amount: float, method: str):
@@ -3506,10 +3546,10 @@ def page_agenda_contas():
     sum_tot  = qone("select coalesce(sum(amount),0) s from resto.payable where status='ABERTO';")["s"]
 
     k1, k2, k3, k4, k5 = st.columns(5)
-    with k1: st.metric("🔴 Vencidos",   money(float(sum_over)))
-    with k2: st.metric("🟠 Hoje",       money(float(sum_hoje)))
-    with k3: st.metric("🟡 Próx. 7 dias", money(float(sum_7)))
-    with k4: st.metric("🟢 Próx. 30 dias", money(float(sum_30)))
+    with k1: st.metric("🔴 Vencidos",        money(float(sum_over)))
+    with k2: st.metric("🟠 Hoje",            money(float(sum_hoje)))
+    with k3: st.metric("🟡 Próx. 7 dias",    money(float(sum_7)))
+    with k4: st.metric("🟢 Próx. 30 dias",   money(float(sum_30)))
     with k5: st.metric("🧮 Total em aberto", money(float(sum_tot)))
 
     st.divider()
@@ -3526,13 +3566,22 @@ def page_agenda_contas():
             ap_val = st.number_input("Valor *", min_value=0.01, value=100.00, step=0.01, format="%.2f", key="ap_val")
         with colf3:
             ap_note = st.text_input("Observação", key="ap_note")
+
         if st.button("Salvar título", key="btn_add_pay"):
-            qexec("""
-                insert into resto.payable(supplier_id, due_date, amount, status, note)
-                values (%s,%s,%s,'ABERTO',%s);
-            """, (int(sup_opt[0]), ap_due, float(ap_val), ap_note or None))
-            st.success("Título incluído.")
-            _rerun()
+            if not sup_opt or not sup_opt[0]:
+                st.error("Selecione um fornecedor válido.")
+            else:
+                # categoria padrão para saídas de compras/estoque
+                cat_out_default = _ensure_cash_category('OUT', 'Compras/Estoque')
+                # ALTERADO: insere já com method e category_id; purchase_id = NULL
+                qexec("""
+                    insert into resto.payable
+                      (supplier_id, due_date, amount, status, method, category_id, note, purchase_id)
+                    values
+                      (%s,         %s,       %s,     'ABERTO', %s,     %s,          %s,  %s);
+                """, (int(sup_opt[0]), ap_due, float(ap_val), 'outro', int(cat_out_default), ap_note or None, None))
+                st.success("Título incluído.")
+                _rerun()
 
     # ---------- filtros ----------
     card_start()
@@ -3584,6 +3633,7 @@ def page_agenda_contas():
 
     # colunas auxiliares
     today = date.today()
+
     def _tag(d):
         if d < today: return "🔴 vencido"
         if d == today: return "🟠 hoje"
@@ -3711,6 +3761,7 @@ def page_agenda_contas():
             _rerun()
 
     card_end()
+
 
 # ===================== RELATÓRIOS =====================
 def page_relatorios():
