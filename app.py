@@ -3728,7 +3728,7 @@ def main():
             # logo="https://seu-dominio.com/logo.png",  # URL externa
             logo_height=92
         )
-    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro", "Importar Extrato"], index=0)
+    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro","Agenda de Contas", "Importar Extrato"], index=0)
 
     if page == "Painel": page_dashboard()
     elif page == "Cadastros": page_cadastros()
