@@ -2538,7 +2538,7 @@ with tabs[2]:
 
     dt_end_next = dre_fim + timedelta(days=1)
 
-    # Helper para pegar escalar com alias 'x'
+    # helper escalar
     def _scalar(sql, params=()):
         try:
             r = qone(sql, params)
@@ -2546,14 +2546,14 @@ with tabs[2]:
         except Exception:
             return 0.0
 
-    # ID da categoria "Vendas (Importadas)" (entradas do extrato tratadas como vendas)
+    # categoria "Vendas (Importadas)" (entradas do extrato marcadas como vendas)
     cat_import = qone(
         "select id from resto.cash_category where kind='IN' and name=%s limit 1;",
         ("Vendas (Importadas)",)
     )
     cat_import_id = int(cat_import["id"]) if cat_import else None
 
-    # Receita de vendas do PDV (tabela sale)
+    # Receita PDV (sale)
     v_pdv = _scalar("""
         select coalesce(sum(total),0) as x
           from resto.sale
@@ -2561,7 +2561,7 @@ with tabs[2]:
            and date >= %s and date < %s;
     """, (dre_ini, dt_end_next))
 
-    # Entradas importadas categorizadas como Vendas (Importadas)
+    # Receita importada (Livro-Caixa) marcada como "Vendas (Importadas)"
     v_imp = 0.0
     if cat_import_id:
         v_imp = _scalar("""
@@ -2572,7 +2572,7 @@ with tabs[2]:
                and entry_date >= %s and entry_date < %s;
         """, (cat_import_id, dre_ini, dt_end_next))
 
-    # Outras receitas do livro-caixa (IN), exceto a categoria de Vendas (Importadas)
+    # Outras receitas (IN) excluindo a categoria de vendas importadas
     if cat_import_id:
         o = _scalar("""
             select coalesce(sum(amount),0) as x
@@ -2582,7 +2582,6 @@ with tabs[2]:
                and (category_id <> %s or category_id is null);
         """, (dre_ini, dt_end_next, cat_import_id))
     else:
-        # se a categoria não existir ainda, todas as IN entram como "outras" (apenas neste cálculo)
         o = _scalar("""
             select coalesce(sum(amount),0) as x
               from resto.cashbook
@@ -2590,7 +2589,7 @@ with tabs[2]:
                and entry_date >= %s and entry_date < %s;
         """, (dre_ini, dt_end_next))
 
-    # Despesas (livro-caixa OUT)
+    # Despesas (OUT)
     d = _scalar("""
         select coalesce(sum(amount),0) as x
           from resto.cashbook
@@ -2605,23 +2604,22 @@ with tabs[2]:
          where move_date >= %s and move_date < %s;
     """, (dre_ini, dt_end_next))
 
-    # Receita final de vendas = PDV + Importadas
+    # Receita total de vendas
     v = (v_pdv or 0.0) + (v_imp or 0.0)
     resultado = v + o - c - d
 
-    # Observações de detalhamento
     obs_receita = "Inclui PDV (sale) + Vendas (Importadas) do Livro-Caixa"
     if not cat_import_id:
         obs_receita = "PDV (sale); categoria 'Vendas (Importadas)' não encontrada"
 
-    # Métricas no topo
+    # Métricas
     k1, k2, k3, k4 = st.columns(4)
     with k1: st.metric("Receita (vendas)",  money(v))
     with k2: st.metric("CMV",               money(c))
     with k3: st.metric("Despesas (caixa)",  money(d))
     with k4: st.metric("Resultado",         money(resultado))
 
-    # GRID
+    # Grid
     import pandas as pd
     linhas = [
         {"Conta": "Receita de Vendas",                   "Valor (R$)": v,        "Observação": obs_receita},
@@ -2632,14 +2630,10 @@ with tabs[2]:
     ]
     df_dre = pd.DataFrame(linhas)
 
-    # Participação % sobre Receita (quando houver receita > 0)
-    part = []
-    for val in df_dre["Valor (R$)"]:
-        if v != 0:
-            part.append((val / v) * 100.0)
-        else:
-            part.append(None)
-    df_dre["Participação % s/ Receita"] = part
+    # participação %
+    df_dre["Participação % s/ Receita"] = [
+        ((val / v) * 100.0) if v != 0 else None for val in df_dre["Valor (R$)"]
+    ]
 
     colcfg = {
         "Conta": st.column_config.TextColumn("Conta"),
@@ -2649,11 +2643,11 @@ with tabs[2]:
     }
     st.dataframe(df_dre, use_container_width=True, hide_index=True, column_config=colcfg)
 
-    # Download
     csv = df_dre.to_csv(index=False).encode("utf-8")
     st.download_button("⬇️ Exportar CSV (DRE)", data=csv, file_name="dre_periodo.csv", mime="text/csv")
 
     card_end()
+
 
 
 
