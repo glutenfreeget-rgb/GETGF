@@ -2525,11 +2525,9 @@ def page_financeiro():
     with tabs[1]:
         _run_grid("OUT", "out", "📤 Saídas")
 
-# ---------- Aba: DRE (grid bonito) ----------
-def _render_tab_dre():
-    from datetime import date, timedelta
-    import pandas as pd
 
+
+    # ---------- Aba: DRE (grid bonito) ----------
     with tabs[2]:
         card_start()
         st.subheader("DRE (período)")
@@ -2540,105 +2538,94 @@ def _render_tab_dre():
         with d2:
             dre_fim = st.date_input("Até", value=date.today(), key="dre_dtfim")
 
-        dt_end_next = dre_fim + timedelta(days=1)
-
-        # helper escalar
-        def _scalar(sql, params=()):
-            try:
-                r = qone(sql, params)
-                return float((r or {}).get("x") or 0.0)
-            except Exception:
-                return 0.0
-
-        # Categoria "Vendas (Importadas)" (entradas do extrato tratadas como VENDAS)
+        # Calcula DRE (tenta completo; se não, fallback p/ livro-caixa)
+        v = c = d = o = 0.0  # receita, cmv, despesas, outras receitas
+        detalhamento = "Completo (vendas + CMV + livro-caixa)"
         try:
-            cat_import = qone(
-                "select id from resto.cash_category where kind='IN' and name=%s limit 1;",
-                ("Vendas (Importadas)",)
-            )
-            cat_import_id = int(cat_import["id"]) if cat_import else None
+            dt_end_next = dre_fim + timedelta(days=1)
+            dre = qone("""
+                with
+                vendas as (
+                    select coalesce(sum(total),0) v
+                      from resto.sale
+                     where status='FECHADA'
+                       and date >= %s
+                       and date <  %s
+                ),
+                cmv as (
+                    select coalesce(sum(case when kind='OUT' then total_cost else 0 end),0) c
+                      from resto.inventory_movement
+                     where move_date >= %s
+                       and move_date <  %s
+                ),
+                caixa_desp as (
+                    select coalesce(sum(case when kind='OUT' then amount else 0 end),0) d
+                      from resto.cashbook
+                     where entry_date >= %s
+                       and entry_date <  %s
+                ),
+                caixa_outros as (
+                    select coalesce(sum(case when kind='IN' then amount else 0 end),0) o
+                      from resto.cashbook
+                     where entry_date >= %s
+                       and entry_date <  %s
+                )
+                select v, c, d, o, (v + o - c - d) as resultado
+                  from vendas, cmv, caixa_desp, caixa_outros;
+            """, (dre_ini, dt_end_next, dre_ini, dt_end_next, dre_ini, dt_end_next, dre_ini, dt_end_next))
+            if dre:
+                v = float(dre["v"] or 0)
+                c = float(dre["c"] or 0)
+                d = float(dre["d"] or 0)
+                o = float(dre["o"] or 0)
+            else:
+                raise RuntimeError("sem dados")
         except Exception:
-            cat_import_id = None
-
-        # Receita PDV (sale)
-        v_pdv = _scalar("""
-            select coalesce(sum(total),0) as x
-              from resto.sale
-             where status='FECHADA'
-               and date >= %s and date < %s;
-        """, (dre_ini, dt_end_next))
-
-        # Receita importada (Livro-Caixa) — categoria "Vendas (Importadas)"
-        v_imp = 0.0
-        if cat_import_id:
-            v_imp = _scalar("""
-                select coalesce(sum(amount),0) as x
+            # fallback simplificado (apenas livro-caixa)
+            detalhamento = "Simplificado (somente livro-caixa)"
+            v = float(qone("""
+                select coalesce(sum(amount),0) s
                   from resto.cashbook
-                 where kind='IN'
-                   and category_id=%s
-                   and entry_date >= %s and entry_date < %s;
-            """, (cat_import_id, dre_ini, dt_end_next))
-
-        # Outras receitas (IN), excluindo a categoria de vendas importadas
-        if cat_import_id:
-            o = _scalar("""
-                select coalesce(sum(amount),0) as x
+                 where kind='IN' and entry_date between %s and %s
+            """, (dre_ini, dre_fim))["s"] or 0)
+            d = float(qone("""
+                select coalesce(sum(amount),0) s
                   from resto.cashbook
-                 where kind='IN'
-                   and entry_date >= %s and entry_date < %s
-                   and (category_id <> %s or category_id is null);
-            """, (dre_ini, dt_end_next, cat_import_id))
-        else:
-            o = _scalar("""
-                select coalesce(sum(amount),0) as x
-                  from resto.cashbook
-                 where kind='IN'
-                   and entry_date >= %s and entry_date < %s;
-            """, (dre_ini, dt_end_next))
+                 where kind='OUT' and entry_date between %s and %s
+            """, (dre_ini, dre_fim))["s"] or 0)
+            c = 0.0
+            o = 0.0
 
-        # Despesas (OUT)
-        d = _scalar("""
-            select coalesce(sum(amount),0) as x
-              from resto.cashbook
-             where kind='OUT'
-               and entry_date >= %s and entry_date < %s;
-        """, (dre_ini, dt_end_next))
-
-        # CMV via movimentos de estoque (OUT)
-        c = _scalar("""
-            select coalesce(sum(case when kind='OUT' then total_cost else 0 end),0) as x
-              from resto.inventory_movement
-             where move_date >= %s and move_date < %s;
-        """, (dre_ini, dt_end_next))
-
-        # Receita total de vendas = PDV + Importadas
-        v = (v_pdv or 0.0) + (v_imp or 0.0)
         resultado = v + o - c - d
 
-        obs_receita = "Inclui PDV (sale) + Vendas (Importadas) do Livro-Caixa"
-        if not cat_import_id:
-            obs_receita = "PDV (sale); categoria 'Vendas (Importadas)' não encontrada"
-
-        # Métricas
+        # Métricas no topo
         k1, k2, k3, k4 = st.columns(4)
         with k1: st.metric("Receita (vendas)",  money(v))
-        with k2: st.metric("CMV",               money(c))
+        with k2: st.metric("CMV",                money(c))
         with k3: st.metric("Despesas (caixa)",  money(d))
         with k4: st.metric("Resultado",         money(resultado))
 
-        # Grid
+        # Monta GRID (valores negativos para itens que subtraem)
+        import pandas as pd
         linhas = [
-            {"Conta": "Receita de Vendas",                   "Valor (R$)": v,        "Observação": obs_receita},
+            {"Conta": "Receita de Vendas",                   "Valor (R$)": v,        "Observação": ""},
             {"Conta": "(-) CMV",                             "Valor (R$)": -c,       "Observação": "Custo dos produtos vendidos"},
             {"Conta": "(-) Despesas (Livro-Caixa)",          "Valor (R$)": -d,       "Observação": ""},
-            {"Conta": "(+) Outras Receitas (Livro-Caixa)",   "Valor (R$)": o,        "Observação": "Exclui 'Vendas (Importadas)'"},
-            {"Conta": "Resultado do Período",                "Valor (R$)": resultado,"Observação": ""},
-        ]
-        df_dre = pd.DataFrame(linhas)
-        df_dre["Participação % s/ Receita"] = [
-            ((val / v) * 100.0) if v != 0 else None for val in df_dre["Valor (R$)"]
+            {"Conta": "(+) Outras Receitas (Livro-Caixa)",   "Valor (R$)": o,        "Observação": ""},
+            {"Conta": "Resultado do Período",                "Valor (R$)": resultado,"Observação": detalhamento},
         ]
 
+        df_dre = pd.DataFrame(linhas)
+        # Participação % sobre Receita (quando houver receita > 0)
+        part = []
+        for val in df_dre["Valor (R$)"]:
+            if v != 0:
+                part.append((val / v) * 100.0)
+            else:
+                part.append(None)
+        df_dre["Participação % s/ Receita"] = part
+
+        # Exibição com column_config (formatação amigável)
         colcfg = {
             "Conta": st.column_config.TextColumn("Conta"),
             "Valor (R$)": st.column_config.NumberColumn("Valor (R$)", format="%.2f"),
@@ -2647,6 +2634,7 @@ def _render_tab_dre():
         }
         st.dataframe(df_dre, use_container_width=True, hide_index=True, column_config=colcfg)
 
+        # Download
         csv = df_dre.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Exportar CSV (DRE)", data=csv, file_name="dre_periodo.csv", mime="text/csv")
 
