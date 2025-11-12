@@ -2529,6 +2529,7 @@ def page_financeiro():
 
     # ---------- Aba: DRE (grid bonito) ----------
     with tabs[2]:
+        from datetime import timedelta  # evita NameError se não estiver no topo
         card_start()
         st.subheader("DRE (período)")
 
@@ -2540,46 +2541,74 @@ def page_financeiro():
 
         # Calcula DRE (tenta completo; se não, fallback p/ livro-caixa)
         v = c = d = o = 0.0  # receita, cmv, despesas, outras receitas
-        detalhamento = "Completo (vendas + CMV + livro-caixa)"
+        detalhamento = "Completo (PDV + Vendas Importadas + CMV + livro-caixa)"
         try:
             dt_end_next = dre_fim + timedelta(days=1)
-            dre = qone("""
-                with
-                vendas as (
-                    select coalesce(sum(total),0) v
-                      from resto.sale
-                     where status='FECHADA'
-                       and date >= %s
-                       and date <  %s
-                ),
-                cmv as (
-                    select coalesce(sum(case when kind='OUT' then total_cost else 0 end),0) c
-                      from resto.inventory_movement
-                     where move_date >= %s
-                       and move_date <  %s
-                ),
-                caixa_desp as (
-                    select coalesce(sum(case when kind='OUT' then amount else 0 end),0) d
-                      from resto.cashbook
-                     where entry_date >= %s
-                       and entry_date <  %s
-                ),
-                caixa_outros as (
-                    select coalesce(sum(case when kind='IN' then amount else 0 end),0) o
-                      from resto.cashbook
-                     where entry_date >= %s
-                       and entry_date <  %s
-                )
-                select v, c, d, o, (v + o - c - d) as resultado
-                  from vendas, cmv, caixa_desp, caixa_outros;
-            """, (dre_ini, dt_end_next, dre_ini, dt_end_next, dre_ini, dt_end_next, dre_ini, dt_end_next))
-            if dre:
-                v = float(dre["v"] or 0)
-                c = float(dre["c"] or 0)
-                d = float(dre["d"] or 0)
-                o = float(dre["o"] or 0)
-            else:
-                raise RuntimeError("sem dados")
+
+            # Receita PDV (sale)
+            r = qone("""
+                select coalesce(sum(total),0) v
+                  from resto.sale
+                 where status='FECHADA'
+                   and date >= %s
+                   and date <  %s;
+            """, (dre_ini, dt_end_next))
+            v_pdv = float((r or {}).get("v") or 0.0)
+
+            # Receita importada (Livro-Caixa) – categoria "Vendas (Importadas)"
+            r = qone("""
+                select coalesce(sum(amount),0) v
+                  from resto.cashbook
+                 where kind='IN'
+                   and category_id = (
+                        select id
+                          from resto.cash_category
+                         where kind='IN' and name='Vendas (Importadas)'
+                         limit 1
+                   )
+                   and entry_date >= %s
+                   and entry_date <  %s;
+            """, (dre_ini, dt_end_next))
+            v_imp = float((r or {}).get("v") or 0.0)
+
+            # CMV via movimentos de estoque (OUT)
+            r = qone("""
+                select coalesce(sum(case when kind='OUT' then total_cost else 0 end),0) c
+                  from resto.inventory_movement
+                 where move_date >= %s
+                   and move_date <  %s;
+            """, (dre_ini, dt_end_next))
+            c = float((r or {}).get("c") or 0.0)
+
+            # Despesas (OUT)
+            r = qone("""
+                select coalesce(sum(amount),0) d
+                  from resto.cashbook
+                 where kind='OUT'
+                   and entry_date >= %s
+                   and entry_date <  %s;
+            """, (dre_ini, dt_end_next))
+            d = float((r or {}).get("d") or 0.0)
+
+            # Outras receitas (IN) EXCLUINDO a categoria "Vendas (Importadas)"
+            r = qone("""
+                select coalesce(sum(amount),0) o
+                  from resto.cashbook
+                 where kind='IN'
+                   and entry_date >= %s
+                   and entry_date <  %s
+                   and category_id is distinct from (
+                        select id
+                          from resto.cash_category
+                         where kind='IN' and name='Vendas (Importadas)'
+                         limit 1
+                   );
+            """, (dre_ini, dt_end_next))
+            o = float((r or {}).get("o") or 0.0)
+
+            # Receita total de vendas = PDV + Importadas
+            v = v_pdv + v_imp
+
         except Exception:
             # fallback simplificado (apenas livro-caixa)
             detalhamento = "Simplificado (somente livro-caixa)"
@@ -2607,11 +2636,12 @@ def page_financeiro():
 
         # Monta GRID (valores negativos para itens que subtraem)
         import pandas as pd
+        obs_receita = "Inclui PDV (sale) + Vendas (Importadas)"
         linhas = [
-            {"Conta": "Receita de Vendas",                   "Valor (R$)": v,        "Observação": ""},
+            {"Conta": "Receita de Vendas",                   "Valor (R$)": v,        "Observação": obs_receita},
             {"Conta": "(-) CMV",                             "Valor (R$)": -c,       "Observação": "Custo dos produtos vendidos"},
             {"Conta": "(-) Despesas (Livro-Caixa)",          "Valor (R$)": -d,       "Observação": ""},
-            {"Conta": "(+) Outras Receitas (Livro-Caixa)",   "Valor (R$)": o,        "Observação": ""},
+            {"Conta": "(+) Outras Receitas (Livro-Caixa)",   "Valor (R$)": o,        "Observação": "Exclui 'Vendas (Importadas)'"},
             {"Conta": "Resultado do Período",                "Valor (R$)": resultado,"Observação": detalhamento},
         ]
 
@@ -2639,6 +2669,7 @@ def page_financeiro():
         st.download_button("⬇️ Exportar CSV (DRE)", data=csv, file_name="dre_periodo.csv", mime="text/csv")
 
         card_end()
+
 
 
 
