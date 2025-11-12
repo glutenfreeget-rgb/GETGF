@@ -3715,45 +3715,114 @@ def page_agenda_contas():
 # ===================== RELATÓRIOS =====================
 def page_relatorios():
     import pandas as pd
-    from io import BytesIO
     from datetime import date
-    # reportlab apenas para o PDF (defensivo: importa dentro da função)
-    try:
+    from io import BytesIO
+
+    def _brl(v: float) -> str:
+        try:
+            n = float(v or 0)
+        except Exception:
+            n = 0.0
+        s = f"R$ {n:,.2f}"
+        return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+    def _ensure_reportlab_runtime() -> bool:
+        try:
+            import reportlab  # noqa
+            return True
+        except Exception:
+            st.info("📄 Para exportar PDF, instale o pacote `reportlab`.")
+            if st.button("Instalar reportlab agora"):
+                import sys, subprocess
+                with st.spinner("Instalando reportlab..."):
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", "reportlab>=4.0,<5"])
+                st.success("Reportlab instalado. Recarregando…")
+                try:
+                    st.rerun()
+                except Exception:
+                    try:
+                        st.experimental_rerun()
+                    except Exception:
+                        pass
+            return False
+
+    def _build_pdf_bytes(dt_ini, dt_fim, df_show, tot_e, tot_s, tot_res) -> bytes:
         from reportlab.lib import colors
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
         from reportlab.lib.styles import getSampleStyleSheet
         from reportlab.lib.pagesizes import A4, landscape
-    except Exception:
-        colors = SimpleDocTemplate = Table = TableStyle = Paragraph = Spacer = None
-        getSampleStyleSheet = A4 = landscape = None
 
-    def _rerun():
-        try: st.rerun()
-        except Exception:
-            try: st.experimental_rerun()
-            except Exception: pass
+        buf = BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=24, rightMargin=24, topMargin=18, bottomMargin=18)
+        styles = getSampleStyleSheet()
+        story = []
 
-    header("📑 Relatórios", "Exportações e resumos por período.")
-    tabs = st.tabs(["💰 Financeiro (por categoria)"])
+        titulo = Paragraph(f"<b>Relatório Financeiro</b> — {dt_ini:%d/%m/%Y} a {dt_fim:%d/%m/%Y}", styles['Title'])
+        story.append(titulo)
+        story.append(Spacer(1, 8))
 
-    # ==================== Financeiro por Categoria ====================
+        # Totais (tabela pequena)
+        tot_data = [
+            ["Entradas (período)", "Saídas (período)", "Resultado (E − S)"],
+            [_brl(tot_e), _brl(tot_s), _brl(tot_res)]
+        ]
+        tot_tbl = Table(tot_data, colWidths=[220, 220, 220])
+        tot_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#F0F0F0")),
+            ('TEXTCOLOR',  (0,0), (-1,0), colors.black),
+            ('ALIGN',      (0,0), (-1,-1), 'CENTER'),
+            ('FONTNAME',   (0,0), (-1,0), 'Helvetica-Bold'),
+            ('FONTSIZE',   (0,0), (-1,0), 10),
+            ('BOTTOMPADDING',(0,0),(-1,0), 8),
+            ('GRID',       (0,0), (-1,-1), 0.25, colors.grey),
+        ]))
+        story.append(tot_tbl)
+        story.append(Spacer(1, 12))
+
+        # Grid por categoria
+        data = [["Categoria", "Entradas", "Saídas", "Saldo"]] + [
+            [r["categoria"], _brl(r["entradas"]), _brl(r["saidas"]), _brl(r["saldo"])]
+            for _, r in df_show.iterrows()
+        ]
+        tbl = Table(data, colWidths=[300, 150, 150, 150])
+        tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#E8EEF7")),
+            ('FONTNAME',   (0,0), (-1,0), 'Helvetica-Bold'),
+            ('ALIGN',      (1,1), (-1,-1), 'RIGHT'),
+            ('ALIGN',      (0,0), (0,-1), 'LEFT'),
+            ('GRID',       (0,0), (-1,-1), 0.25, colors.grey),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor("#FAFAFA")]),
+        ]))
+        story.append(tbl)
+
+        doc.build(story)
+        return buf.getvalue()
+
+    header("📑 Relatórios", "Exportações oficiais (PDF/CSV).")
+    tabs = st.tabs(["💰 Financeiro"])
+
     with tabs[0]:
         card_start()
-        st.subheader("Relatório Financeiro — por Categoria - GET GLUTEN FREE LTDA")
+        st.subheader("Financeiro — Exportação")
 
-        # Filtros
+        # Filtros mínimos
         c1, c2 = st.columns(2)
         with c1:
             dt_ini = st.date_input("De", value=date.today().replace(day=1), key="rel_fin_dtini")
         with c2:
             dt_fim = st.date_input("Até", value=date.today(), key="rel_fin_dtfim")
 
-        cats_all = qall("select id, name from resto.cash_category order by name;") or []
-        cat_opts = [(c["id"], c["name"]) for c in cats_all]
-        sel = st.multiselect("Categorias (opcional)", options=cat_opts, format_func=lambda x: x[1], key="rel_fin_cats")
-        sel_ids = [c[0] for c in sel] if sel else []
+        cats = qall("select id, name from resto.cash_category order by name;") or []
+        cat_opts = [(c["id"], c["name"]) for c in cats]
+        sel_cats = st.multiselect(
+            "Categorias (opcional)",
+            options=cat_opts,
+            format_func=lambda x: x[1],
+            key="rel_fin_cats"
+        )
+        sel_ids = [c[0] for c in sel_cats] if sel_cats else []
 
-        # Query agregada por categoria
+        # Consulta (sem exibir na tela)
         wh = ["cb.entry_date >= %s", "cb.entry_date <= %s"]
         pr = [dt_ini, dt_fim]
         if sel_ids:
@@ -3774,129 +3843,57 @@ def page_relatorios():
         rows = qall(sql, tuple(pr)) or []
         df = pd.DataFrame(rows)
 
-        # Normalização para exibição: saída positiva
+        # Se houver dados, prepara os arquivos; senão, avisa
         if not df.empty:
             df["entradas"] = df["entradas_raw"].astype(float)
-            df["saidas"]   = df["saidas_raw"].astype(float).apply(lambda x: -x if x < 0 else x)
-            df["saldo"]    = df["entradas"] - df["saidas"]
-            df_show = df[["categoria","entradas","saidas","saldo"]].sort_values("categoria")
-        else:
-            df_show = pd.DataFrame(columns=["categoria","entradas","saidas","saldo"])
+            # garante saídas positivas (independe de como foi gravado)
+            df["saidas"] = df["saidas_raw"].astype(float).abs()
+            df["saldo"] = df["entradas"] - df["saidas"]
+            df_show = df[["categoria", "entradas", "saidas", "saldo"]].sort_values("categoria")
 
-        # Totais do período
-        tot_in  = float(df_show["entradas"].sum()) if not df_show.empty else 0.0
-        tot_out = float(df_show["saidas"].sum())   if not df_show.empty else 0.0
-        resultado = tot_in - tot_out
+            tot_e = float(df_show["entradas"].sum())
+            tot_s = float(df_show["saidas"].sum())
+            tot_res = float(df_show["saldo"].sum())
 
-        # Topo com totais (como no pedido)
-        k1, k2, k3 = st.columns(3)
-        with k1: st.metric("Entradas (período)", money(tot_in))
-        with k2: st.metric("Saídas (período)",   money(tot_out))
-        with k3: st.metric("Resultado (E − S)",  money(resultado))
-
-        st.markdown("#### Por categoria")
-        st.dataframe(
-            df_show.rename(columns={
-                "categoria":"Categoria","entradas":"Entrada","saidas":"Saída","saldo":"Saldo"
-            }),
-            use_container_width=True, hide_index=True
-        )
-
-        # ===== Exportações =====
-        colx1, colx2 = st.columns(2)
-
-        # CSV
-        with colx1:
-            csv = df_show.rename(columns={
-                "categoria":"Categoria","entradas":"Entrada","saidas":"Saída","saldo":"Saldo"
+            # CSV
+            csv_bytes = df_show.rename(columns={
+                "categoria": "Categoria",
+                "entradas": "Entradas",
+                "saidas": "Saídas",
+                "saldo": "Saldo"
             }).to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ Exportar CSV", data=csv, file_name="relatorio_financeiro_categorias.csv", mime="text/csv")
 
-        # PDF paisagem
-        with colx2:
-            if SimpleDocTemplate is None:
-                st.info("📄 Para exportar PDF, instale `reportlab` no ambiente.")
-            else:
-                def _fmt_br(v: float) -> str:
-                    s = f"R$ {v:,.2f}"
-                    # formatação BR
-                    return s.replace(",", "X").replace(".", ",").replace("X", ".")
+            # PDF
+            has_pdf = _ensure_reportlab_runtime()
+            if has_pdf:
+                pdf_bytes = _build_pdf_bytes(dt_ini, dt_fim, df_show, tot_e, tot_s, tot_res)
 
-                def _build_pdf_bytes():
-                    buf = BytesIO()
-                    doc = SimpleDocTemplate(
-                        buf, pagesize=landscape(A4),
-                        leftMargin=18, rightMargin=18, topMargin=20, bottomMargin=20
-                    )
-                    styles = getSampleStyleSheet()
-                    elements = []
-
-                    title = Paragraph(
-                        "Relatório Financeiro por Categoria",
-                        styles["Title"]
-                    )
-                    subtitle = Paragraph(
-                        f"Período: {dt_ini.strftime('%d/%m/%Y')} a {dt_fim.strftime('%d/%m/%Y')}",
-                        styles["Normal"]
-                    )
-                    elements += [title, subtitle, Spacer(1, 8)]
-
-                    # Totais no topo
-                    top_data = [
-                        ["Entradas (período)", _fmt_br(tot_in),
-                         "Saídas (período)",   _fmt_br(tot_out),
-                         "Resultado (E − S)",  _fmt_br(resultado)]
-                    ]
-                    top_tbl = Table(top_data, colWidths=[120, 120, 120, 120, 140, 120])
-                    top_tbl.setStyle(TableStyle([
-                        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
-                        ("TEXTCOLOR",  (0,0), (-1,0), colors.black),
-                        ("ALIGN",      (0,0), (-1,0), "LEFT"),
-                        ("VALIGN",     (0,0), (-1,0), "MIDDLE"),
-                        ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-                        ("FONTSIZE",   (0,0), (-1,0), 10),
-                        ("INNERGRID",  (0,0), (-1,-1), 0.25, colors.grey),
-                        ("BOX",        (0,0), (-1,-1), 0.5, colors.grey),
-                    ]))
-                    elements += [top_tbl, Spacer(1, 10)]
-
-                    # Tabela principal
-                    table_data = [["Categoria", "Entrada", "Saída", "Saldo"]]
-                    for _, r in df_show.iterrows():
-                        table_data.append([
-                            r["categoria"],
-                            _fmt_br(float(r["entradas"])),
-                            _fmt_br(float(r["saidas"])),
-                            _fmt_br(float(r["saldo"])),
-                        ])
-
-                    col_widths = [280, 120, 120, 120]
-                    t = Table(table_data, colWidths=col_widths, hAlign="LEFT")
-                    t.setStyle(TableStyle([
-                        ("BACKGROUND", (0,0), (-1,0), colors.lightgrey),
-                        ("FONTNAME",   (0,0), (-1,0), "Helvetica-Bold"),
-                        ("ALIGN",      (1,1), (-1,-1), "RIGHT"),
-                        ("ALIGN",      (0,0), (0,-1), "LEFT"),
-                        ("FONTSIZE",   (0,0), (-1,-1), 9),
-                        ("INNERGRID",  (0,0), (-1,-1), 0.25, colors.grey),
-                        ("BOX",        (0,0), (-1,-1), 0.5, colors.grey),
-                        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.whitesmoke, colors.aliceblue]),
-                    ]))
-                    elements.append(t)
-
-                    doc.build(elements)
-                    buf.seek(0)
-                    return buf.read()
-
-                pdf_bytes = _build_pdf_bytes()
+            # Botões de download (sem mostrar grid ou métricas)
+            colb1, colb2 = st.columns(2)
+            with colb1:
                 st.download_button(
-                    "📄 Exportar PDF (paisagem)",
-                    data=pdf_bytes,
-                    file_name=f"relatorio_financeiro_{dt_ini.strftime('%Y%m%d')}_{dt_fim.strftime('%Y%m%d')}.pdf",
-                    mime="application/pdf"
+                    "⬇️ Baixar CSV (Financeiro)",
+                    data=csv_bytes,
+                    file_name=f"relatorio_financeiro_{dt_ini:%Y%m%d}_{dt_fim:%Y%m%d}.csv",
+                    mime="text/csv",
+                    use_container_width=True
                 )
+            with colb2:
+                if has_pdf:
+                    st.download_button(
+                        "📄 Baixar PDF (paisagem)",
+                        data=pdf_bytes,
+                        file_name=f"relatorio_financeiro_{dt_ini:%Y%m%d}_{dt_fim:%Y%m%d}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+                else:
+                    st.caption("PDF indisponível (instale o reportlab para habilitar).")
+        else:
+            st.info("Sem lançamentos para o período/filtro escolhido. Ajuste os filtros para habilitar os downloads.")
 
         card_end()
+
 
 
 
