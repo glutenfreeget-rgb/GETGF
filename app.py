@@ -3739,7 +3739,7 @@ def page_relatorios():
     # ==================== Financeiro por Categoria ====================
     with tabs[0]:
         card_start()
-        st.subheader("Relatório Financeiro — por Categoria")
+        st.subheader("Relatório Financeiro — por Categoria - GET GLUTEN FREE LTDA")
 
         # Filtros
         c1, c2 = st.columns(2)
