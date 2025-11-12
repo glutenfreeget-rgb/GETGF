@@ -2651,6 +2651,7 @@ with tabs[2]:
 
 
 
+
     # ---------- Aba: Gestão (Filtros + Grid editável) ----------
     with tabs[3]:
         card_start()
