@@ -187,6 +187,25 @@ def _ensure_cash_category_compras() -> int:
     """)
     return int(r["id"])
 
+def _ensure_cash_category(kind: str, name: str) -> int:
+    """Garante/retorna o id da categoria (kind, name) sem exigir índice único."""
+    r = qone("""
+        with upsert as (
+          insert into resto.cash_category(kind, name)
+          values (%s,%s)
+          on conflict (kind, name) do update set name=excluded.name
+          returning id
+        )
+        select id from upsert
+        union all
+        select id from resto.cash_category where kind=%s and name=%s limit 1;
+    """, (kind, name, kind, name))
+    return int(r["id"])
+
+def _sales_import_category_id() -> int:
+    """Categoria padrão para entradas importadas tratadas como VENDAS."""
+    return _ensure_cash_category('IN', 'Vendas (Importadas)')
+
 def _record_cashbook_out_from_purchase(purchase_id: int, method: str, entry_date):
     head = qone("""
         select p.id, p.doc_date, coalesce(p.freight_value,0) frete, coalesce(p.other_costs,0) outros, s.name fornecedor
@@ -3201,7 +3220,6 @@ def _load_c6_csv(raw: bytes) -> pd.DataFrame:
     csv_body = "\n".join(lines[start:])
     df = pd.read_csv(StringIO(csv_body), sep=",", dtype=str, keep_default_na=False)
 
-    # Mapeia nomes (com e sem acentos, se necessário)
     def _col(*names):
         for n in names:
             if n in df.columns:
@@ -3222,65 +3240,46 @@ def _load_c6_csv(raw: bytes) -> pd.DataFrame:
         "description_main": (df[col_desc].astype(str) if col_desc else ""),
         "description_alt":  (df[col_tit].astype(str)  if col_tit  else ""),
     })
-
-    # `description` = junção (Título | Descrição), mas se só tiver uma, usa a que houver
     out["description"] = (
         out["description_alt"].str.strip() + " | " + out["description_main"].str.strip()
     ).str.strip(" |")
-
     out["amount"] = df[col_ent].apply(_parse_brl_amount) - df[col_sai].apply(_parse_brl_amount)
     return out.dropna(subset=["entry_date"])
-
 
 def _load_csv_generic(raw: bytes) -> pd.DataFrame:
     from io import StringIO
     txt = _read_text_guess(raw)
     if not txt:
         return pd.DataFrame()
-    # tenta inferir separador pela 1ª linha
     first = txt.splitlines()[0] if txt.splitlines() else ""
     sep = _guess_sep(first)
     df = pd.read_csv(StringIO(txt), sep=sep, dtype=str, keep_default_na=False)
 
-    # Mapa simples por lowercase (mantendo acentos se houver)
     cols = {c.lower(): c for c in df.columns}
-
-    # Coluna de data
     entry_col = (cols.get("data") or cols.get("date") or cols.get("data lançamento")
                  or cols.get("data lancamento") or cols.get("entry_date"))
     if not entry_col:
         return pd.DataFrame()
 
-    # Candidatas de descrição principal e alternativa
-    cand_main = [
-        "descrição","descricao","description","histórico","historico","memo","narrativa"
-    ]
-    cand_alt = [
-        "título","titulo","title","detalhe","detalhes","complemento","observação","observacao"
-    ]
+    cand_main = ["descrição","descricao","description","histórico","historico","memo","narrativa"]
+    cand_alt  = ["título","titulo","title","detalhe","detalhes","complemento","observação","observacao"]
     desc_col = next((cols[c] for c in cand_main if c in cols), None)
     alt_col  = next((cols[c] for c in cand_alt  if c in cols and cols[c] != desc_col), None)
-
-    # Valores: uma coluna 'valor/amount' OU par crédito/débito
-    val_col = cols.get("valor") or cols.get("amount")
-    ent_col = (cols.get("entrada(r$)") or cols.get("credito") or cols.get("crédito") or cols.get("credit"))
-    sai_col = (cols.get("saída(r$)") or cols.get("saida(r$)") or cols.get("debito") or cols.get("débito") or cols.get("debit"))
-
     if not (desc_col or alt_col):
-        # se não achar nenhuma descritiva, tente usar qualquer 'título'
         desc_col = alt_col or next((cols[c] for c in ("titulo","título","title","description") if c in cols), None)
 
-    # monta base
     base = pd.DataFrame({
         "entry_date": pd.to_datetime(df[entry_col], dayfirst=True, errors="coerce").dt.date,
         "description_main": df[desc_col].astype(str) if desc_col else "",
         "description_alt":  df[alt_col].astype(str)  if alt_col  else "",
     })
-
-    # description combinada (alt | main) quando existir, senão usa apenas uma
     base["description"] = (
         base["description_alt"].str.strip() + " | " + base["description_main"].str.strip()
     ).str.strip(" |")
+
+    val_col = cols.get("valor") or cols.get("amount")
+    ent_col = (cols.get("entrada(r$)") or cols.get("credito") or cols.get("crédito") or cols.get("credit"))
+    sai_col = (cols.get("saída(r$)") or cols.get("saida(r$)") or cols.get("debito") or cols.get("débito") or cols.get("debit"))
 
     if val_col:
         base["amount"] = df[val_col].apply(_parse_brl_amount)
@@ -3290,7 +3289,6 @@ def _load_csv_generic(raw: bytes) -> pd.DataFrame:
         return pd.DataFrame()
 
     return base.dropna(subset=["entry_date"])
-
 
 def _load_bank_file(up) -> pd.DataFrame:
     raw = up.read()
@@ -3326,6 +3324,36 @@ def _find_duplicates(df: pd.DataFrame) -> pd.Series:
     )
     return df2["key"].isin(set(base["key"]))
 
+# ---------- NOVOS HELPERS (categoria fixa para ENTRADAS = VENDAS) ----------
+def _ensure_cash_category(kind: str, name: str) -> int:
+    """Garante e retorna id da categoria (sem depender de índices específicos)."""
+    r = qone("""
+        with upsert as (
+          insert into resto.cash_category(kind, name)
+          values (%s,%s)
+          on conflict (kind, name) do update set name=excluded.name
+          returning id
+        )
+        select id from upsert
+        union all
+        select id from resto.cash_category where kind=%s and name=%s limit 1;
+    """, (kind, name, kind, name))
+    return int(r["id"])
+
+def _sales_import_category_id() -> int:
+    """Categoria fixa para entradas importadas tratadas como VENDAS."""
+    return _ensure_cash_category('IN', 'Vendas (Importadas)')
+
+def _guess_method_from_desc(desc: str) -> str:
+    s = (desc or "").lower()
+    if "pix" in s: return "pix"
+    if "débito" in s or "debito" in s: return "cartão débito"
+    if "crédito" in s or "credito" in s: return "cartão crédito"
+    if "boleto" in s: return "boleto"
+    if "ted" in s or "doc" in s or "transfer" in s: return "transferência"
+    if "dinheiro" in s or "cash" in s: return "dinheiro"
+    return "outro"
+
 def page_importar_extrato():
     header("🏦 Importar Extrato (CSV)", "Modelo C6 ou CSV genérico com data/descrição/valor.")
     card_start()
@@ -3346,35 +3374,38 @@ def page_importar_extrato():
     st.dataframe(df.head(100), use_container_width=True, hide_index=True)
 
     st.subheader("2) Ajustes e classificação")
-    cats = qall("select id, name, kind from resto.cash_category order by name;")
-    if not cats:
-        st.warning("Nenhuma categoria encontrada. Crie categorias em **Financeiro → Livro caixa** antes de importar.")
-        card_end()
-        return
 
-    col1, col2, col3 = st.columns(3)
+    # Buscamos categorias atuais (mas vamos FIXAR ENTRADAS como 'Vendas (Importadas)')
+    cats = qall("select id, name, kind from resto.cash_category order by name;") or []
+    out_cats = [(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='OUT']
+
+    # fallback defensivo caso não haja nenhuma OUT cadastrada
+    if not out_cats:
+        def_out_id = _ensure_cash_category('OUT', 'Despesas (Importadas)')
+        out_cats = [(def_out_id, "Despesas (Importadas) (OUT)")]
+
+    col1, col2 = st.columns(2)
     with col1:
-        default_cat_in = st.selectbox(
-            "Categoria padrão para ENTRADAS",
-            options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='IN'],
-            format_func=lambda x: x[1] if isinstance(x, tuple) else x
-        )
+        st.info("Entradas importadas serão categorizadas automaticamente como **Vendas (Importadas)**.")
     with col2:
         default_cat_out = st.selectbox(
             "Categoria padrão para SAÍDAS",
-            options=[(c['id'], f"{c['name']} ({c['kind']})") for c in cats if c['kind']=='OUT'],
+            options=out_cats,
             format_func=lambda x: x[1] if isinstance(x, tuple) else x
         )
-    with col3:
-        method = st.selectbox(
-            "Método (opcional — deixe em auto p/ detectar por descrição)",
-            ['— auto por descrição —','dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro']
-        )
 
-    # Define coluna kind e category_id por sinal do valor
+    method = st.selectbox(
+        "Método (opcional — deixe em auto p/ detectar por descrição)",
+        ['— auto por descrição —','dinheiro','pix','cartão débito','cartão crédito','boleto','transferência','outro']
+    )
+
+    # Define coluna kind
     out = df.copy()
     out["kind"] = out["amount"].apply(lambda v: "IN" if float(v) >= 0 else "OUT")
-    out["category_id"] = out["kind"].apply(lambda k: default_cat_in[0] if k=="IN" else default_cat_out[0])
+
+    # Categoria por linha:
+    sales_cat_id = _sales_import_category_id()
+    out["category_id"] = out["kind"].apply(lambda k: sales_cat_id if k == "IN" else default_cat_out[0])
 
     # Método por linha (auto por descrição) + override opcional
     try:
@@ -3384,7 +3415,7 @@ def page_importar_extrato():
     if method != "— auto por descrição —":
         out["method"] = method
 
-    # Duplicados (últimos 12 meses) – sua lógica existente
+    # Duplicados (últimos 12 meses)
     out["duplicado?"] = _find_duplicates(out)
 
     st.subheader("3) Conferência")
@@ -3410,7 +3441,6 @@ def page_importar_extrato():
             amount     = round(float(r["amount"]), 2)
             method_row = r.get("method") or 'outro'
 
-            # Evita UniqueViolation sem depender do nome do índice/constraint:
             sql = """
             insert into resto.cashbook(entry_date, kind, category_id, description, amount, method)
             select %s, %s, %s, %s, %s, %s
@@ -3429,7 +3459,7 @@ def page_importar_extrato():
             )
 
             try:
-                rc = qexec(sql, params)  # qexec deve retornar rowcount
+                rc = qexec(sql, params)  # se seu qexec não retorna rowcount, tudo bem: cairá no else e contará como duplicado
                 if rc and rc > 0:
                     inserted += 1
                 else:
@@ -3439,6 +3469,7 @@ def page_importar_extrato():
 
         st.success(f"Importação finalizada: {inserted} inseridos • {skipped_dup} ignorados (duplicados) • {skipped_err} com erro.")
     card_end()
+
     
 # ===================== AGENDA DE CONTAS (A PAGAR) =====================
 def page_agenda_contas():
