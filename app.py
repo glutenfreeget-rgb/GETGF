@@ -2525,14 +2525,6 @@ def page_financeiro():
     with tabs[1]:
         _run_grid("OUT", "out", "📤 Saídas")
 
-
-
-CHAT AGORA NÃO ABRE NADA
-POR FAVOR
-ESTA É A ABA QUE ESTÁ FUNCIONANDO, FAÇA A ALTERAÇÃO PARA TRATAR AS VENDAS, MAS DEVOLVA FUNCIONANDO POR FAVOR
-
-caht este é minha aba DRE faça a alteração para tratar as vendas
-
     # ---------- Aba: DRE (grid bonito) ----------
     with tabs[2]:
         card_start()
