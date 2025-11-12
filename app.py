@@ -2527,245 +2527,124 @@ def page_financeiro():
 
 
 
-# ---------- Aba: DRE (grid bonito) ----------
-with tabs[2]:
-    from datetime import timedelta, date
-    import pandas as pd
+CHAT AGORA NÃO ABRE NADA
+POR FAVOR
+ESTA É A ABA QUE ESTÁ FUNCIONANDO, FAÇA A ALTERAÇÃO PARA TRATAR AS VENDAS, MAS DEVOLVA FUNCIONANDO POR FAVOR
 
-    card_start()
-    st.subheader("DRE (período)")
+caht este é minha aba DRE faça a alteração para tratar as vendas
 
-    d1, d2 = st.columns(2)
-    with d1:
-        dre_ini = st.date_input("De", value=date.today().replace(day=1), key="dre_dtini")
-    with d2:
-        dre_fim = st.date_input("Até", value=date.today(), key="dre_dtfim")
+    # ---------- Aba: DRE (grid bonito) ----------
+    with tabs[2]:
+        card_start()
+        st.subheader("DRE (período)")
 
-    dt_end_next = dre_fim + timedelta(days=1)
+        d1, d2 = st.columns(2)
+        with d1:
+            dre_ini = st.date_input("De", value=date.today().replace(day=1), key="dre_dtini")
+        with d2:
+            dre_fim = st.date_input("Até", value=date.today(), key="dre_dtfim")
 
-    # ---------------- helpers ----------------
-    def _scalar(sql, params=()):
+        # Calcula DRE (tenta completo; se não, fallback p/ livro-caixa)
+        v = c = d = o = 0.0  # receita, cmv, despesas, outras receitas
+        detalhamento = "Completo (vendas + CMV + livro-caixa)"
         try:
-            r = qone(sql, params)
-            return float((r or {}).get("x") or 0.0)
-        except Exception:
-            return 0.0
-
-    def _table_exists(schema: str, table: str) -> bool:
-        try:
-            r = qone("""
-                select exists(
-                    select 1 from information_schema.tables
-                     where table_schema=%s and table_name=%s
-                ) as ok;
-            """, (schema, table))
-            return bool((r or {}).get("ok"))
-        except Exception:
-            return False
-
-    def _columns(schema: str, table: str) -> set:
-        try:
-            rows = qall("""
-                select column_name
-                  from information_schema.columns
-                 where table_schema=%s and table_name=%s;
-            """, (schema, table)) or []
-            return {r["column_name"] for r in rows}
-        except Exception:
-            return set()
-
-    def _compute_cmv(d1, d2_ex):
-        """
-        Calcula CMV priorizando:
-        1) resto.inventory_movement / resto.stock_movement (kind='OUT' e src/source='sale' se existir)
-           - usa total_cost; se não existir, usa qty*unit_cost
-        2) fallback: soma qty*unit_cost de resto.sale_item
-        3) fallback: soma qty*last_cost (produto) em resto.sale_item
-        """
-        # 1) movimentações de estoque
-        tbl = None
-        if _table_exists("resto", "inventory_movement"):
-            tbl = "inventory_movement"
-        elif _table_exists("resto", "stock_movement"):
-            tbl = "stock_movement"
-
-        if tbl:
-            cols = _columns("resto", tbl)
-            # data
-            if "move_date" in cols:
-                date_expr = "move_date"
-            elif "date" in cols:
-                date_expr = "\"date\""  # escapa se a coluna chama 'date'
-            elif "created_at" in cols:
-                date_expr = "created_at::date"
+            dt_end_next = dre_fim + timedelta(days=1)
+            dre = qone("""
+                with
+                vendas as (
+                    select coalesce(sum(total),0) v
+                      from resto.sale
+                     where status='FECHADA'
+                       and date >= %s
+                       and date <  %s
+                ),
+                cmv as (
+                    select coalesce(sum(case when kind='OUT' then total_cost else 0 end),0) c
+                      from resto.inventory_movement
+                     where move_date >= %s
+                       and move_date <  %s
+                ),
+                caixa_desp as (
+                    select coalesce(sum(case when kind='OUT' then amount else 0 end),0) d
+                      from resto.cashbook
+                     where entry_date >= %s
+                       and entry_date <  %s
+                ),
+                caixa_outros as (
+                    select coalesce(sum(case when kind='IN' then amount else 0 end),0) o
+                      from resto.cashbook
+                     where entry_date >= %s
+                       and entry_date <  %s
+                )
+                select v, c, d, o, (v + o - c - d) as resultado
+                  from vendas, cmv, caixa_desp, caixa_outros;
+            """, (dre_ini, dt_end_next, dre_ini, dt_end_next, dre_ini, dt_end_next, dre_ini, dt_end_next))
+            if dre:
+                v = float(dre["v"] or 0)
+                c = float(dre["c"] or 0)
+                d = float(dre["d"] or 0)
+                o = float(dre["o"] or 0)
             else:
-                date_expr = None
-
-            # custo total
-            if "total_cost" in cols:
-                total_cost_expr = "total_cost"
-            else:
-                qty_col = "qty" if "qty" in cols else ("quantity" if "quantity" in cols else None)
-                uc_col  = "unit_cost" if "unit_cost" in cols else None
-                total_cost_expr = f"({qty_col} * coalesce({uc_col},0))" if (qty_col and uc_col) else None
-
-            # filtro pela origem 'sale' se existir coluna
-            if "src" in cols:
-                src_filter = "and src='sale'"
-            elif "source" in cols:
-                src_filter = "and source='sale'"
-            else:
-                src_filter = ""  # se não existe, não filtra (pega TODAS saídas)
-
-            if date_expr and total_cost_expr:
-                try:
-                    r = qone(f"""
-                        select coalesce(sum({total_cost_expr}),0) as x
-                          from resto.{tbl}
-                         where kind='OUT' {src_filter}
-                           and {date_expr} >= %s and {date_expr} < %s;
-                    """, (d1, d2_ex))
-                    return float((r or {}).get("x") or 0.0)
-                except Exception:
-                    pass  # cai para fallback abaixo
-
-        # 2) fallback: sale_item com unit_cost
-        try:
-            r = qone("""
-                select coalesce(sum(si.qty * coalesce(si.unit_cost,0)),0) as x
-                  from resto.sale_item si
-                  join resto.sale s on s.id = si.sale_id
-                 where s.status='FECHADA'
-                   and s.date >= %s and s.date < %s;
-            """, (d1, d2_ex))
-            v = float((r or {}).get("x") or 0.0)
-            if v > 0:
-                return v
+                raise RuntimeError("sem dados")
         except Exception:
-            pass
+            # fallback simplificado (apenas livro-caixa)
+            detalhamento = "Simplificado (somente livro-caixa)"
+            v = float(qone("""
+                select coalesce(sum(amount),0) s
+                  from resto.cashbook
+                 where kind='IN' and entry_date between %s and %s
+            """, (dre_ini, dre_fim))["s"] or 0)
+            d = float(qone("""
+                select coalesce(sum(amount),0) s
+                  from resto.cashbook
+                 where kind='OUT' and entry_date between %s and %s
+            """, (dre_ini, dre_fim))["s"] or 0)
+            c = 0.0
+            o = 0.0
 
-        # 3) fallback: sale_item * last_cost do produto
-        try:
-            r = qone("""
-                select coalesce(sum(si.qty * coalesce(p.last_cost,0)),0) as x
-                  from resto.sale_item si
-                  join resto.sale s on s.id = si.sale_id
-                  join resto.product p on p.id = si.product_id
-                 where s.status='FECHADA'
-                   and s.date >= %s and s.date < %s;
-            """, (d1, d2_ex))
-            return float((r or {}).get("x") or 0.0)
-        except Exception:
-            return 0.0
+        resultado = v + o - c - d
 
-    # ---------------- RECEITA (vendas) ----------------
-    # PDV (sale)
-    v_pdv = _scalar("""
-        select coalesce(sum(total),0) as x
-          from resto.sale
-         where status='FECHADA'
-           and date >= %s and date < %s;
-    """, (dre_ini, dt_end_next))
+        # Métricas no topo
+        k1, k2, k3, k4 = st.columns(4)
+        with k1: st.metric("Receita (vendas)",  money(v))
+        with k2: st.metric("CMV",                money(c))
+        with k3: st.metric("Despesas (caixa)",  money(d))
+        with k4: st.metric("Resultado",         money(resultado))
 
-    # Vendas importadas do livro-caixa (categoria "Vendas (Importadas)")
-    cat_import = qone("""
-        select id from resto.cash_category
-         where kind='IN' and name=%s
-         limit 1;
-    """, ("Vendas (Importadas)",))
-    cat_import_id = int(cat_import["id"]) if cat_import else None
+        # Monta GRID (valores negativos para itens que subtraem)
+        import pandas as pd
+        linhas = [
+            {"Conta": "Receita de Vendas",                   "Valor (R$)": v,        "Observação": ""},
+            {"Conta": "(-) CMV",                             "Valor (R$)": -c,       "Observação": "Custo dos produtos vendidos"},
+            {"Conta": "(-) Despesas (Livro-Caixa)",          "Valor (R$)": -d,       "Observação": ""},
+            {"Conta": "(+) Outras Receitas (Livro-Caixa)",   "Valor (R$)": o,        "Observação": ""},
+            {"Conta": "Resultado do Período",                "Valor (R$)": resultado,"Observação": detalhamento},
+        ]
 
-    v_imp = 0.0
-    if cat_import_id:
-        v_imp = _scalar("""
-            select coalesce(sum(amount),0) as x
-              from resto.cashbook
-             where kind='IN'
-               and category_id = %s
-               and entry_date >= %s and entry_date < %s;
-        """, (cat_import_id, dre_ini, dt_end_next))
+        df_dre = pd.DataFrame(linhas)
+        # Participação % sobre Receita (quando houver receita > 0)
+        part = []
+        for val in df_dre["Valor (R$)"]:
+            if v != 0:
+                part.append((val / v) * 100.0)
+            else:
+                part.append(None)
+        df_dre["Participação % s/ Receita"] = part
 
-    # Outras receitas (IN) excluindo a categoria de vendas importadas
-    if cat_import_id:
-        o = _scalar("""
-            select coalesce(sum(amount),0) as x
-              from resto.cashbook
-             where kind='IN'
-               and entry_date >= %s and entry_date < %s
-               and (category_id <> %s or category_id is null);
-        """, (dre_ini, dt_end_next, cat_import_id))
-    else:
-        o = _scalar("""
-            select coalesce(sum(amount),0) as x
-              from resto.cashbook
-             where kind='IN'
-               and entry_date >= %s and entry_date < %s;
-        """, (dre_ini, dt_end_next))
+        # Exibição com column_config (formatação amigável)
+        colcfg = {
+            "Conta": st.column_config.TextColumn("Conta"),
+            "Valor (R$)": st.column_config.NumberColumn("Valor (R$)", format="%.2f"),
+            "Participação % s/ Receita": st.column_config.NumberColumn("Part. %", format="%.2f"),
+            "Observação": st.column_config.TextColumn("Observação"),
+        }
+        st.dataframe(df_dre, use_container_width=True, hide_index=True, column_config=colcfg)
 
-    # Despesas (OUT)
-    d = _scalar("""
-        select coalesce(sum(amount),0) as x
-          from resto.cashbook
-         where kind='OUT'
-           and entry_date >= %s and entry_date < %s;
-    """, (dre_ini, dt_end_next))
+        # Download
+        csv = df_dre.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Exportar CSV (DRE)", data=csv, file_name="dre_periodo.csv", mime="text/csv")
 
-    # CMV (com auto-detecção e fallbacks)
-    c = _compute_cmv(dre_ini, dt_end_next)
-
-    # Receita total de vendas
-    v = (v_pdv or 0.0) + (v_imp or 0.0)
-    resultado = v + o - c - d
-
-    obs_receita = "Inclui PDV (sale) + 'Vendas (Importadas)' do Livro-Caixa"
-    if not cat_import_id:
-        obs_receita = "PDV (sale); categoria 'Vendas (Importadas)' não encontrada"
-
-    # ---------------- Exibição ----------------
-    k1, k2, k3, k4 = st.columns(4)
-    with k1: st.metric("Receita (vendas)",  money(v))
-    with k2: st.metric("CMV",               money(c))
-    with k3: st.metric("Despesas (caixa)",  money(d))
-    with k4: st.metric("Resultado",         money(resultado))
-
-    linhas = [
-        {"Conta": "Receita de Vendas",                 "Valor (R$)": v,        "Observação": obs_receita},
-        {"Conta": "(-) CMV",                           "Valor (R$)": -c,       "Observação": "Custo dos produtos vendidos"},
-        {"Conta": "(-) Despesas (Livro-Caixa)",        "Valor (R$)": -d,       "Observação": ""},
-        {"Conta": "(+) Outras Receitas (Livro-Caixa)", "Valor (R$)":  o,       "Observação": ""},
-        {"Conta": "Resultado do Período",              "Valor (R$)": resultado,"Observação": ""},
-    ]
-
-    df_dre = pd.DataFrame(linhas)
-    df_dre["Participação % s/ Receita"] = [
-        ((val / v) * 100.0) if v != 0 else None for val in df_dre["Valor (R$)"]
-    ]
-
-    colcfg = {
-        "Conta": st.column_config.TextColumn("Conta"),
-        "Valor (R$)": st.column_config.NumberColumn("Valor (R$)", format="%.2f"),
-        "Participação % s/ Receita": st.column_config.NumberColumn("Part. %", format="%.2f"),
-        "Observação": st.column_config.TextColumn("Observação"),
-    }
-    st.dataframe(df_dre, use_container_width=True, hide_index=True, column_config=colcfg)
-
-    csv = df_dre.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Exportar CSV (DRE)", data=csv, file_name="dre_periodo.csv", mime="text/csv")
-
-    # (opcional) diagnóstico rápido do caminho usado p/ CMV
-    with st.expander("🔎 Diagnóstico CMV", expanded=False):
-        st.caption("""
-- O CMV é calculado tentando primeiro movimentos de estoque (OUT, src/source='sale' se existir),
-  usando total_cost ou qty*unit_cost. Se essa via falhar, cai para sale_item (qty*unit_cost),
-  e por último para sale_item (qty*last_cost do produto).
-- Se ainda aparecer 0, verifique:
-  1) Se movimentos de venda estão sendo gravados na tabela de movimentações.
-  2) Se 'unit_cost'/'total_cost' estão preenchidos.
-  3) Se a coluna de data é 'move_date'/'date'/'created_at'.
-        """)
-
-    card_end()
-
+        card_end()
 
 
 
