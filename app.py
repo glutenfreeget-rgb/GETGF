@@ -1763,41 +1763,112 @@ def page_producao():
                 st.success(f"Ficha técnica salva. ✅ {upd} atualizado(s) • ➕ {ins} incluído(s) • 🗑️ {dele} removido(s) • ⚠️ {err} erro(s).")
                 _rerun()
 
-        # ---------- Estimativa de custo (exibição) ----------
+        # ---------- Custos detalhados por ingrediente (explicativo) ----------
         if recipe:
-            cost_rows = qall("""
-                select ri.qty, coalesce(ri.conversion_factor,1) as conversion_factor, coalesce(p.last_cost,0) as last_cost
+            rows = qall("""
+                select ri.qty,
+                       coalesce(ri.conversion_factor,1) as conv,
+                       ri.unit_id,
+                       p.name as ingrediente,
+                       coalesce(p.last_cost,0) as last_cost
                   from resto.recipe_item ri
                   join resto.product p on p.id = ri.ingredient_id
-                 where ri.recipe_id=%s;
+                 where ri.recipe_id=%s
+                 order by p.name;
             """, (recipe["id"],)) or []
-            if cost_rows:
-                tot_ing_cost = 0.0
-                for r in cost_rows:
-                    try:
-                        tot_ing_cost += float(r["qty"]) * float(r.get("conversion_factor") or 1.0) * float(r["last_cost"])
-                    except Exception:
-                        pass
-                over = float(recipe.get("overhead_pct") or 0.0) / 100.0
-                loss = float(recipe.get("loss_pct") or 0.0) / 100.0
-                batch_cost = tot_ing_cost * (1 + over) * (1 + loss)
+
+            import pandas as pd
+            df_det = pd.DataFrame(rows)
+
+            if not df_det.empty:
+                # Unidades legíveis
+                df_det["Un"] = df_det["unit_id"].map(abbr_by_id).fillna("")
+
+                # Quantidade efetiva = qty * conv
+                df_det["qty_eff"] = df_det.apply(lambda r: float(r["qty"]) * float(r["conv"]), axis=1)
+
+                # Subtotal = qty_eff * last_cost
+                df_det["subtotal"] = df_det.apply(lambda r: float(r["qty_eff"]) * float(r["last_cost"]), axis=1)
+
+                # Coluna explicativa do cálculo
+                def _fmt_calc(r):
+                    q = float(r["qty"])
+                    f = float(r["conv"])
+                    lc = float(r["last_cost"])
+                    st = float(r["subtotal"])
+                    un = (r["Un"] or "").strip()
+                    # ex.: 0,500 kg × 1,20 × R$ 12,34 = R$ 7,40
+                    return f"{q:,.3f} {un} × {f:,.2f} × {money(lc)} = {money(st)}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+                df_det["Cálculo"] = df_det.apply(_fmt_calc, axis=1)
+
+                # Reordena e renomeia para exibir
+                df_view = pd.DataFrame({
+                    "Ingrediente": df_det["ingrediente"],
+                    "Qtd": df_det["qty"].map(lambda v: float(v)),
+                    "Un": df_det["Un"],
+                    "Fator": df_det["conv"].map(lambda v: float(v)),
+                    "Custo último (R$)": df_det["last_cost"].map(lambda v: float(v)),
+                    "Qtd efetiva": df_det["qty_eff"].map(lambda v: float(v)),
+                    "Subtotal (R$)": df_det["subtotal"].map(lambda v: float(v)),
+                    "Cálculo": df_det["Cálculo"],
+                })
+
+                st.markdown("### 📊 Custos por ingrediente (explicado)")
+                st.dataframe(
+                    df_view,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Qtd": st.column_config.NumberColumn("Qtd", format="%.3f"),
+                        "Fator": st.column_config.NumberColumn("Fator", format="%.2f"),
+                        "Custo último (R$)": st.column_config.NumberColumn("Custo último (R$)", format="%.2f"),
+                        "Qtd efetiva": st.column_config.NumberColumn("Qtd efetiva", format="%.3f"),
+                        "Subtotal (R$)": st.column_config.NumberColumn("Subtotal (R$)", format="%.2f"),
+                    }
+                )
+
+                # Totais e explicação do lote
+                tot_ing = float(df_det["subtotal"].sum())
+                over_pct = float(recipe.get("overhead_pct") or 0.0) / 100.0
+                loss_pct = float(recipe.get("loss_pct") or 0.0) / 100.0
+
+                # Aplicamos como você já fazia: lote = tot_ing * (1 + over) * (1 + loss)
+                over_val = tot_ing * over_pct
+                loss_val = (tot_ing + over_val) * loss_pct
+                batch_cost = tot_ing + over_val + loss_val
+
                 yq = float(recipe.get("yield_qty") or 1.0)
                 unit_cost = batch_cost / (yq if yq > 0 else 1.0)
 
+                # Rendimento com unidade (se existir)
                 ytxt = f"{yq:.3f}"
                 if has_yield_unit:
-                    yabbr = ""
                     try:
                         r_u = qone("select abbr from resto.unit where id=%s;", (recipe.get("yield_unit_id"),))
-                        if r_u: yabbr = r_u.get("abbr") or ""
+                        yabbr = (r_u or {}).get("abbr") or ""
+                        if yabbr:
+                            ytxt = f"{yq:.3f} {yabbr}"
                     except Exception:
                         pass
-                    if yabbr:
-                        ytxt = f"{yq:.3f} {yabbr}"
 
-                st.info(f"💡 **Custo unitário estimado:** {money(unit_cost)}  —  **Custo do lote:** {money(batch_cost)}  —  **Rendimento:** {ytxt}")
+                st.markdown("#### 🧮 Resumo do lote")
+                c1, c2, c3, c4, c5 = st.columns(5)
+                with c1: st.metric("Σ Ingredientes", money(tot_ing))
+                with c2: st.metric(f"Overhead ({over_pct*100:.2f}%)", money(over_val))
+                with c3: st.metric(f"Perdas ({loss_pct*100:.2f}%)", money(loss_val))
+                with c4: st.metric("Custo do lote", money(batch_cost))
+                with c5: st.metric("Custo unitário", money(unit_cost))
 
-        card_end()
+                with st.expander("Como calculamos? (passo a passo)", expanded=False):
+                    st.markdown(
+                        "- **Subtotal por item** = `Qtd` × `Fator` × `Custo último`  \n"
+                        f"- **Total ingredientes** = soma dos subtotais = **{money(tot_ing)}**  \n"
+                        f"- **Overhead** = Total ingredientes × {over_pct*100:.2f}% = **{money(over_val)}**  \n"
+                        f"- **Perdas** = (Total ingredientes + Overhead) × {loss_pct*100:.2f}% = **{money(loss_val)}**  \n"
+                        f"- **Custo do lote** = Total ingredientes + Overhead + Perdas = **{money(batch_cost)}**  \n"
+                        f"- **Custo unitário** = Custo do lote ÷ Rendimento ({ytxt}) = **{money(unit_cost)}**"
+                    )
 
     # ==================== Aba Nova Produção ====================
     with tabs[0]:
