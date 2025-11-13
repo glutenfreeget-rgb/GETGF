@@ -223,7 +223,26 @@ def _record_cashbook_out_from_purchase(purchase_id: int, method: str, entry_date
     """, (entry_date, cat_id, desc, total, method))
 
 # ===================== CANCELAR PRODUÇÃO (estorno) =====================
-def _ensure_production_schema():
+    def _ensure_production_status_column():
+        # Cria a coluna 'status' na resto.production caso ainda não exista
+        qexec("""
+        do $$
+        begin
+          if not exists (
+            select 1
+              from information_schema.columns
+             where table_schema='resto'
+               and table_name='production'
+               and column_name='status'
+          ) then
+            alter table resto.production add column status text default 'FECHADA';
+            update resto.production set status = 'FECHADA' where status is null;
+          end if;
+        end
+        $$;
+        """)
+
+    def _ensure_production_schema():
     # Cria/ajusta tudo de forma defensiva (sem quebrar o que já existe)
     qexec("""
     do $$
@@ -2239,35 +2258,39 @@ def cancel_production(production_id: int, note: str = "") -> bool:
 
 def _render_cancel_ui():
     import pandas as pd
+    _ensure_production_status_column()  # <— garante a coluna antes de consultar
+
     card_start()
     st.subheader("⛔ Cancelar produção")
 
     rows = qall("""
         select p.id,
-               p.date::date as data,
-               pr.name as produto,
+               p.date::date        as data,
+               pr.name             as produto,
                p.qty,
                p.unit_cost,
                p.total_cost,
                coalesce(p.status,'FECHADA') as status
           from resto.production p
-          join resto.product pr on pr.id = p.product_id
+          join resto.product   pr on pr.id = p.product_id
          order by p.id desc
          limit 50;
     """) or []
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    pid = st.number_input("ID da produção para cancelar", min_value=1, step=1)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    pid  = st.number_input("ID da produção para cancelar", min_value=1, step=1)
     note = st.text_input("Motivo (opcional)")
 
     if st.button("⛔ Cancelar produção selecionada"):
-        ok = cancel_production(int(pid), note)
+        ok = cancel_production(int(pid), note)  # usa sua função que estorna movimentos e marca status='CANCELADA'
         if ok:
-            st.success(f"Produção #{int(pid)} cancelada com estorno/baixa lógica aplicada.")
+            st.success(f"Produção #{int(pid)} cancelada com estorno no estoque.")
             st.rerun()
         else:
             st.warning("Nada cancelado (ID inexistente ou já cancelado).")
     card_end()
+
 
 
 
