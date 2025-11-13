@@ -223,32 +223,94 @@ def _record_cashbook_out_from_purchase(purchase_id: int, method: str, entry_date
     """, (entry_date, cat_id, desc, total, method))
 
 # ===================== CANCELAR PRODUÇÃO (estorno) =====================
-def _ensure_production_cancel_schema():
+def _ensure_production_schema():
+    # Cria/ajusta tudo de forma defensiva (sem quebrar o que já existe)
     qexec("""
     do $$
     begin
+      -- Unidades
+      create table if not exists resto.unit (
+          id    bigserial primary key,
+          abbr  text not null unique,
+          name  text
+      );
+
+      -- Receita (1:1 com produto)
+      create table if not exists resto.recipe (
+          id           bigserial primary key,
+          product_id   bigint not null references resto.product(id) on delete cascade,
+          yield_qty    numeric(18,6) not null default 1,
+          overhead_pct numeric(9,4)  not null default 0,
+          loss_pct     numeric(9,4)  not null default 0,
+          note         text,
+          created_at   timestamptz not null default now(),
+          updated_at   timestamptz not null default now()
+      );
+      create unique index if not exists recipe_uq_product on resto.recipe(product_id);
+
+      -- Se não existir yield_unit_id, adiciona (sem NOT NULL)
       if not exists (
-        select 1 from information_schema.columns
-         where table_schema='resto' and table_name='production' and column_name='status'
+          select 1 from information_schema.columns
+           where table_schema='resto' and table_name='recipe' and column_name='yield_unit_id'
       ) then
-        alter table resto.production add column status text default 'FECHADA';
+          alter table resto.recipe add column yield_unit_id bigint references resto.unit(id);
       end if;
 
+      -- Itens da receita (ingredientes)
+      create table if not exists resto.recipe_item (
+          id                bigserial primary key,
+          recipe_id         bigint not null references resto.recipe(id) on delete cascade,
+          ingredient_id     bigint not null references resto.product(id),
+          qty               numeric(14,3) not null,
+          unit_id           bigint,
+          conversion_factor numeric(14,6) default 1.0,
+          note              text
+      );
+      create index if not exists recipe_item_recipe_idx on resto.recipe_item(recipe_id);
+
+      -- Produção (ordem de produção)
+      create table if not exists resto.production (
+          id          bigserial primary key,
+          date        timestamptz default now(),
+          product_id  bigint not null references resto.product(id),
+          qty         numeric(14,3) not null,
+          unit_cost   numeric(14,4) not null,
+          total_cost  numeric(14,2) not null,
+          lot_number  text,
+          expiry_date date,
+          note        text
+          -- OBS: status será garantido abaixo, via IF NOT EXISTS
+      );
+
+      -- >>> GARANTE COLUNA 'status' <<<
       if not exists (
-        select 1 from information_schema.columns
-         where table_schema='resto' and table_name='production' and column_name='cancelled_at'
+          select 1 from information_schema.columns
+           where table_schema='resto' and table_name='production' and column_name='status'
       ) then
-        alter table resto.production add column cancelled_at timestamptz;
+          alter table resto.production add column status text;
+          alter table resto.production alter column status set default 'FECHADA';
+          update resto.production set status = 'FECHADA' where status is null;
       end if;
 
+      -- Índice opcional para status
       if not exists (
-        select 1 from information_schema.columns
-         where table_schema='resto' and table_name='production' and column_name='cancel_note'
+          select 1 from pg_indexes
+           where schemaname='resto' and indexname='production_status_idx'
       ) then
-        alter table resto.production add column cancel_note text;
+          create index production_status_idx on resto.production(status);
       end if;
+
+      -- Campos auxiliares nos produtos
+      alter table resto.product add column if not exists unit      text default 'un';
+      alter table resto.product add column if not exists last_cost numeric(14,2) default 0;
+      alter table resto.product add column if not exists active    boolean default true;
     end $$;
     """)
+
+    -- Semeia unidades básicas sem estourar UniqueViolation
+    for abbr, name in [("un","Unidade"),("kg","Quilo"),("g","Grama"),
+                       ("L","Litro"),("ml","Mililitro"),("cx","Caixa"),("pct","Pacote")]:
+        qexec("insert into resto.unit(abbr,name) values (%s,%s) on conflict do nothing;", (abbr, name))
 
 def cancel_production(production_id: int, note: str = "") -> bool:
     """
