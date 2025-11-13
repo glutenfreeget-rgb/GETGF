@@ -2115,9 +2115,11 @@ def page_producao():
 
         card_end()
         
+    
 
 def _render_cancel_ui():
     import pandas as pd
+    with tabs[2]:
     card_start()
     st.subheader("⛔ Cancelar produção")
 
