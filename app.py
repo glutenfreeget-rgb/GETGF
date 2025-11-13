@@ -1567,8 +1567,7 @@ def page_producao():
         return
     prod_id = prod[0]
     prod_row = next((r for r in prods if r["id"] == prod_id), {"unit": "un", "last_cost": 0})
-    #tabs = st.tabs(["Saldos", "Movimentos", "Lotes & Validade", "Cadastro"])
-   tabs = st.tabs(["🛠️ Nova produção", "📜 Ficha técnica (receita)"])
+    tabs = st.tabs(["🛠️ Nova produção", "📜 Ficha técnica (receita)"])
  
     # ==================== Aba Ficha Técnica (FORMULÁRIO ÚNICO) ====================
     with tabs[1]:
