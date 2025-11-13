@@ -1648,7 +1648,7 @@ def page_producao():
     prod_id = prod[0]
     prod_row = next((r for r in prods if r["id"] == prod_id), {"unit": "un", "last_cost": 0})
 
-    tabs = st.tabs(["🛠️ Nova produção", "📜 Ficha técnica (receita)"])
+   tabs = st.tabs(["🛠️ Nova produção", "📜 Ficha técnica (receita)", "⛔ Cancelar produção"])
 
     # ==================== Aba Ficha Técnica (FORMULÁRIO ÚNICO) ====================
     with tabs[1]:
@@ -2116,10 +2116,12 @@ def page_producao():
         card_end()
         
     
-
+    # ----------------- Aba Cancelar Produção (NOVA) ------------------
+with tabs[2]:
+        _render_cancel_ui()
 def _render_cancel_ui():
     import pandas as pd
-    with tabs[2]:
+    
     card_start()
     st.subheader("⛔ Cancelar produção")
 
