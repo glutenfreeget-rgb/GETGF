@@ -1782,16 +1782,27 @@ def page_producao():
             import pandas as pd
             df_det = pd.DataFrame(rows)
 
-            # util: converte quantidades entre abreviações conhecidas
+            # --- normalizador de unidades + conversão robusta ---
+            def _norm_unit(u: str) -> str:
+                u = (u or "").strip().lower()
+                mapa = {
+                    "g": "g", "grama": "g", "gramas": "g",
+                    "kg": "kg", "quilo": "kg", "kilograma": "kg", "kilogramas": "kg",
+                    "ml": "ml", "mililitro": "ml", "mililitros": "ml",
+                    "l": "L", "lt": "L", "lts": "L", "litro": "L", "litros": "L",
+                    "un": "un", "unid": "un", "unidade": "un", "unidades": "un",
+                }
+                return mapa.get(u, u or "")
+        
             def _convert_qty(q, from_abbr, to_abbr):
-                fa = (from_abbr or "").strip()
-                ta = (to_abbr or "").strip()
+                fa = _norm_unit(from_abbr)
+                ta = _norm_unit(to_abbr)
                 q = float(q or 0)
                 if not fa or not ta or fa == ta:
                     return q, False
                 pairs = {
-                    ("g","kg"): 1/1000, ("kg","g"): 1000,
-                    ("ml","L"): 1/1000, ("L","ml"): 1000,
+                    ("g", "kg"): 1/1000, ("kg", "g"): 1000,
+                    ("ml", "L"): 1/1000, ("L", "ml"): 1000,
                 }
                 factor = pairs.get((fa, ta))
                 if factor is None:
