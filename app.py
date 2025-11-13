@@ -282,7 +282,7 @@ def _ensure_production_schema():
           -- OBS: status será garantido abaixo, via IF NOT EXISTS
       );
 
-      -- >>> GARANTE COLUNA 'status' <<<
+      -- Garante coluna 'status' (usada pelo cancelamento/consulta)
       if not exists (
           select 1 from information_schema.columns
            where table_schema='resto' and table_name='production' and column_name='status'
@@ -307,10 +307,15 @@ def _ensure_production_schema():
     end $$;
     """)
 
-    -- Semeia unidades básicas sem estourar UniqueViolation
-    for abbr, name in [("un","Unidade"),("kg","Quilo"),("g","Grama"),
-                       ("L","Litro"),("ml","Mililitro"),("cx","Caixa"),("pct","Pacote")]:
-        qexec("insert into resto.unit(abbr,name) values (%s,%s) on conflict do nothing;", (abbr, name))
+    # Semeia unidades básicas sem estourar UniqueViolation
+    for abbr, name in [
+        ("un","Unidade"),("kg","Quilo"),("g","Grama"),
+        ("L","Litro"),("ml","Mililitro"),("cx","Caixa"),("pct","Pacote")
+    ]:
+        qexec(
+            "insert into resto.unit(abbr,name) values (%s,%s) on conflict do nothing;",
+            (abbr, name)
+        )
 
 def cancel_production(production_id: int, note: str = "") -> bool:
     """
