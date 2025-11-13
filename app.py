@@ -1763,7 +1763,7 @@ def page_producao():
                 st.success(f"Ficha técnica salva. ✅ {upd} atualizado(s) • ➕ {ins} incluído(s) • 🗑️ {dele} removido(s) • ⚠️ {err} erro(s).")
                 _rerun()
 
-me mande a aba ja alterada por favor
+
         # ---------- Custos detalhados por ingrediente (explicativo, com conversão de unidade) ----------
         if recipe:
             rows = qall("""
