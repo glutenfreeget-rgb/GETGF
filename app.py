@@ -4095,12 +4095,12 @@ def page_relatorios():
             st.info("Sem lançamentos para o período/filtro escolhido. Ajuste os filtros para habilitar os downloads.")
 
         card_end()
-
+#===================================================CANCELAR PRODUÇÃO=====================================================================
 def page_producao_cancelar():
     import pandas as pd
     from datetime import date
 
-    # ---------- helpers locais ----------
+    # ---------- helpers ----------
     def _rerun():
         try:
             st.rerun()
@@ -4108,30 +4108,25 @@ def page_producao_cancelar():
             if hasattr(st, "experimental_rerun"):
                 st.experimental_rerun()
 
-    # garante colunas necessárias em resto.production (sem quebrar versão antiga)
+    # garante colunas novas (compatível com bases antigas)
     qexec("""
     do $$
     begin
       begin
         alter table resto.production add column if not exists status text;
-      exception when duplicate_column then null;
-      end;
+      exception when duplicate_column then null; end;
       begin
         alter table resto.production add column if not exists canceled_at timestamptz;
-      exception when duplicate_column then null;
-      end;
+      exception when duplicate_column then null; end;
       begin
         alter table resto.production add column if not exists cancel_note text;
-      exception when duplicate_column then null;
-      end;
-      -- default amigável se vier nulo
+      exception when duplicate_column then null; end;
       update resto.production set status='FECHADA' where status is null;
     end $$;
     """)
 
-    # função de estorno
+    # estorno de produção
     def _cancel_production(pid: int, note: str = "") -> tuple[bool, str]:
-        # carrega cabeçalho
         p = qone("""
             select p.*, pr.name as product_name
               from resto.production p
@@ -4147,7 +4142,7 @@ def page_producao_cancelar():
         qty_final = float(p.get("qty") or 0.0)
         prod_id   = int(p["product_id"])
 
-        # 1) OUT do produto acabado (reverte a entrada criada pela produção)
+        # 1) reverte entrada do produto final
         out_note = f"revert:production:{pid}"
         try:
             qexec("select resto.sp_register_movement(%s,'OUT',%s,null,'production_revert',%s,%s);",
@@ -4155,7 +4150,7 @@ def page_producao_cancelar():
         except Exception:
             return False, "Falha ao registrar saída do produto acabado."
 
-        # 2) IN de cada insumo consumido, com mesmo custo
+        # 2) devolve insumos (usa itens ATUAIS do lote)
         itens = qall("""
             select id, ingredient_id, qty, unit_cost, coalesce(lot_id,0) as lot_id
               from resto.production_item
@@ -4182,16 +4177,16 @@ def page_producao_cancelar():
         return True, f"Produção #{pid} cancelada e estoques estornados."
 
     # ---------- UI ----------
-    header("⛔ Cancelar produção", "Estorna o estoque e marca a ordem como CANCELADA.")
+    header("⛔ Cancelar produção", "Ajuste os itens do lote (se necessário) e cancele com estorno de estoque.")
 
-    # Lista recentes (limpa e compatível com bases antigas)
+    # lista recentes
     rows = qall("""
         select p.id,
-               p.date::date          as data,
-               pr.name               as produto,
-               coalesce(p.qty,0)     as qtd_final,
-               coalesce(p.unit_cost,0) as custo_unit,
-               coalesce(p.total_cost,0) as custo_total,
+               p.date::date              as data,
+               pr.name                   as produto,
+               coalesce(p.qty,0)         as qtd_final,
+               coalesce(p.unit_cost,0)   as custo_unit,
+               coalesce(p.total_cost,0)  as custo_total,
                coalesce(p.status,'FECHADA') as status
           from resto.production p
           join resto.product pr on pr.id = p.product_id
@@ -4209,7 +4204,6 @@ def page_producao_cancelar():
 
     st.dataframe(df_list, use_container_width=True, hide_index=True)
 
-    # Filtros simples
     c1, c2 = st.columns([1, 2])
     with c1:
         only_open = st.checkbox("Mostrar apenas NÃO canceladas", value=True)
@@ -4228,21 +4222,162 @@ def page_producao_cancelar():
 
     sel_id = int(sel[0])
 
-    # Detalhe (mostra insumos)
+    # ---------- BLOCO DE EDIÇÃO DOS ITENS DO LOTE ----------
+    st.markdown("### ✏️ Editar itens do lote")
+    st.caption("As alterações **não mexem no estoque agora**; o estoque só muda quando você clicar **Cancelar produção**.")
+
+    # base de itens (antes da edição) e soma original p/ fator
+    orig_sum_row = qone("select coalesce(sum(total_cost),0) s from resto.production_item where production_id=%s;", (sel_id,))
+    orig_sum = float((orig_sum_row or {}).get("s") or 0.0)
+
     itens = qall("""
-        select pi.id, pr.name as ingrediente, pi.qty, pi.unit_cost, pi.total_cost, pi.lot_id
+        select pi.id, pr.name as ingrediente, pi.qty, pi.unit_cost, pi.total_cost, pi.lot_id, pi.ingredient_id
           from resto.production_item pi
           join resto.product pr on pr.id = pi.ingredient_id
          where pi.production_id=%s
          order by pi.id;
     """, (sel_id,)) or []
-    st.markdown("#### Insumos consumidos")
-    st.dataframe(pd.DataFrame(itens), use_container_width=True, hide_index=True)
+    df = pd.DataFrame(itens)
+
+    if df.empty:
+        st.info("Este lote não possui itens.")
+    else:
+        df["Excluir?"] = False
+        cfg = {
+            "id":            st.column_config.NumberColumn("ID", disabled=True),
+            "ingrediente":   st.column_config.TextColumn("Ingrediente", disabled=True),
+            "qty":           st.column_config.NumberColumn("Quantidade", step=0.001, format="%.3f"),
+            "unit_cost":     st.column_config.NumberColumn("Custo unitário", step=0.01, format="%.4f"),
+            "total_cost":    st.column_config.NumberColumn("Subtotal", disabled=True, format="%.2f"),
+            "lot_id":        st.column_config.NumberColumn("Lote (id)", disabled=True),
+            "ingredient_id": st.column_config.NumberColumn("ingredient_id", disabled=True),
+            "Excluir?":      st.column_config.CheckboxColumn("Excluir?"),
+        }
+        edited = st.data_editor(
+            df[["id","ingrediente","qty","unit_cost","total_cost","lot_id","ingredient_id","Excluir?"]],
+            column_config=cfg, hide_index=True, num_rows="fixed",
+            key=f"edit_items_{sel_id}", use_container_width=True
+        )
+
+        cA, cB, cC = st.columns([1.2,1.2,1.6])
+        with cA:
+            do_save_items = st.button("💾 Salvar alterações nos itens", key=f"save_items_{sel_id}")
+        with cB:
+            do_reload = st.button("🔄 Recarregar", key=f"reload_items_{sel_id}")
+        with cC:
+            st.caption("Dica: editar **Quantidade** e **Custo unitário**. Use **Excluir?** para remover o item.")
+
+        if do_reload:
+            _rerun()
+
+        if do_save_items:
+            orig = df.set_index("id")
+            new  = edited.set_index("id")
+            upd = delc = err = 0
+
+            # deletar marcados
+            for iid in new.index[new["Excluir?"] == True].tolist():
+                try:
+                    qexec("delete from resto.production_item where id=%s;", (int(iid),))
+                    delc += 1
+                except Exception:
+                    err += 1
+
+            # atualizar alterados
+            keep = [i for i in new.index if i not in new.index[new["Excluir?"] == True].tolist()]
+            for iid in keep:
+                a = orig.loc[iid]; b = new.loc[iid]
+                # detecta mudança em qty/unit_cost
+                changed = (float(a.get("qty") or 0) != float(b.get("qty") or 0)) or \
+                          (float(a.get("unit_cost") or 0) != float(b.get("unit_cost") or 0))
+                if not changed:
+                    continue
+                try:
+                    qty  = float(b.get("qty") or 0.0)
+                    ucost= float(b.get("unit_cost") or 0.0)
+                    tcost= round(qty * ucost, 2)
+                    qexec("""
+                        update resto.production_item
+                           set qty=%s, unit_cost=%s, total_cost=%s
+                         where id=%s;
+                    """, (qty, ucost, tcost, int(iid)))
+                    upd += 1
+                except Exception:
+                    err += 1
+
+            # recalcula cabeçalho preservando fator de overhead/perdas
+            hdr = qone("select coalesce(total_cost,0) as tot, coalesce(qty,0) as qty from resto.production where id=%s;", (sel_id,))
+            prev_total = float((hdr or {}).get("tot") or 0.0)
+            prev_ing_sum = float(orig_sum or 0.0)
+            factor = (prev_total / prev_ing_sum) if prev_ing_sum > 0 else 1.0
+
+            new_sum_row = qone("select coalesce(sum(total_cost),0) s from resto.production_item where production_id=%s;", (sel_id,))
+            new_sum = float((new_sum_row or {}).get("s") or 0.0)
+            new_total = new_sum * factor
+            qty_final = float((hdr or {}).get("qty") or 0.0)
+            new_unit  = (new_total / qty_final) if qty_final > 0 else 0.0
+
+            try:
+                qexec("update resto.production set total_cost=%s, unit_cost=%s where id=%s;", (new_total, new_unit, sel_id))
+            except Exception:
+                # se não conseguir atualizar cabeçalho, segue mesmo assim
+                pass
+
+            st.success(f"Itens: ✅ {upd} atualizado(s) • 🗑️ {delc} excluído(s) • ⚠️ {err} erro(s).")
+            _rerun()
+
+    # ---------- adicionar novo item ao lote ----------
+    st.markdown("### ➕ Adicionar item ao lote")
+    prods_ing = qall("select id, name from resto.product where coalesce(is_ingredient,true) is true and coalesce(active,true) is true order by name;") or \
+                qall("select id, name from resto.product order by name;") or []
+    opts_ing = [(r["id"], r["name"]) for r in prods_ing]
+
+    c1, c2, c3, _ = st.columns([2,1,1,1])
+    with c1:
+        novo_ing = st.selectbox("Ingrediente", options=opts_ing,
+                                format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+                                key=f"new_ing_{sel_id}")
+    with c2:
+        novo_qty = st.number_input("Quantidade", min_value=0.001, step=0.001, value=1.000, format="%.3f",
+                                   key=f"new_qty_{sel_id}")
+    with c3:
+        novo_uc  = st.number_input("Custo unitário", min_value=0.0, step=0.01, value=0.00, format="%.4f",
+                                   key=f"new_uc_{sel_id}")
+
+    if st.button("Adicionar ao lote", key=f"btn_add_{sel_id}") and novo_ing:
+        try:
+            tcost = round(float(novo_qty) * float(novo_uc), 2)
+            qexec("""
+                insert into resto.production_item(production_id, ingredient_id, qty, unit_cost, total_cost)
+                values (%s,%s,%s,%s,%s);
+            """, (sel_id, int(novo_ing[0]), float(novo_qty), float(novo_uc), tcost))
+            # atualiza cabeçalho mantendo fator
+            hdr = qone("select coalesce(total_cost,0) as tot, coalesce(qty,0) as qty from resto.production where id=%s;", (sel_id,))
+            prev_total = float((hdr or {}).get("tot") or 0.0)
+            # soma antiga (antes da inclusão)
+            old_sum_row = qone("select coalesce(sum(total_cost),0) s from resto.production_item where production_id=%s;", (sel_id,))
+            # esse select já pega COM o novo item; então calcule old_sum = new_sum - tcost
+            new_sum_all = float((old_sum_row or {}).get("s") or 0.0)
+            old_sum = max(new_sum_all - tcost, 0.0)
+            factor = (prev_total / old_sum) if old_sum > 0 else 1.0
+            new_total = new_sum_all * factor
+            qty_final = float((hdr or {}).get("qty") or 0.0)
+            new_unit  = (new_total / qty_final) if qty_final > 0 else 0.0
+            try:
+                qexec("update resto.production set total_cost=%s, unit_cost=%s where id=%s;", (new_total, new_unit, sel_id))
+            except Exception:
+                pass
+
+            st.success("Item incluído no lote.")
+            _rerun()
+        except Exception:
+            st.error("Falha ao incluir item.")
 
     st.divider()
-    st.warning("⚠️ Esta ação estorna o estoque (produto final sai, insumos retornam) e marca a produção como **CANCELADA**.")
-    motivo = st.text_input("Motivo (opcional)")
-    if st.button("⛔ Cancelar esta produção agora"):
+    # ---------- CANCELAR A PRODUÇÃO ----------
+    st.warning("⚠️ Ao cancelar: o produto final sai do estoque e **todos os itens do lote (atuais)** retornam ao estoque.")
+    motivo = st.text_input("Motivo do cancelamento (opcional)")
+    if st.button("⛔ Cancelar esta produção agora", type="primary"):
         ok, msg = _cancel_production(sel_id, motivo)
         if ok:
             st.success(msg)
