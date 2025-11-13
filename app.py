@@ -2115,7 +2115,7 @@ def page_producao():
 
         card_end()
         
-with tabs[2]:
+
 def _render_cancel_ui():
     import pandas as pd
     card_start()
