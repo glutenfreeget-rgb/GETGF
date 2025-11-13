@@ -2114,7 +2114,8 @@ def page_producao():
             st.dataframe(dfc, use_container_width=True, hide_index=True)
 
         card_end()
-
+        
+with tabs[2]:
 def _render_cancel_ui():
     import pandas as pd
     card_start()
