@@ -4096,6 +4096,161 @@ def page_relatorios():
 
         card_end()
 
+def page_producao_cancelar():
+    import pandas as pd
+    from datetime import date
+
+    # ---------- helpers locais ----------
+    def _rerun():
+        try:
+            st.rerun()
+        except Exception:
+            if hasattr(st, "experimental_rerun"):
+                st.experimental_rerun()
+
+    # garante colunas necessárias em resto.production (sem quebrar versão antiga)
+    qexec("""
+    do $$
+    begin
+      begin
+        alter table resto.production add column if not exists status text;
+      exception when duplicate_column then null;
+      end;
+      begin
+        alter table resto.production add column if not exists canceled_at timestamptz;
+      exception when duplicate_column then null;
+      end;
+      begin
+        alter table resto.production add column if not exists cancel_note text;
+      exception when duplicate_column then null;
+      end;
+      -- default amigável se vier nulo
+      update resto.production set status='FECHADA' where status is null;
+    end $$;
+    """)
+
+    # função de estorno
+    def _cancel_production(pid: int, note: str = "") -> tuple[bool, str]:
+        # carrega cabeçalho
+        p = qone("""
+            select p.*, pr.name as product_name
+              from resto.production p
+              join resto.product pr on pr.id = p.product_id
+             where p.id=%s;
+        """, (int(pid),))
+        if not p:
+            return False, "Produção não encontrada."
+
+        if (p.get("status") or "").upper() == "CANCELADA":
+            return False, "Esta produção já está CANCELADA."
+
+        qty_final = float(p.get("qty") or 0.0)
+        prod_id   = int(p["product_id"])
+
+        # 1) OUT do produto acabado (reverte a entrada criada pela produção)
+        out_note = f"revert:production:{pid}"
+        try:
+            qexec("select resto.sp_register_movement(%s,'OUT',%s,null,'production_revert',%s,%s);",
+                  (prod_id, qty_final, int(pid), out_note))
+        except Exception:
+            return False, "Falha ao registrar saída do produto acabado."
+
+        # 2) IN de cada insumo consumido, com mesmo custo
+        itens = qall("""
+            select id, ingredient_id, qty, unit_cost, coalesce(lot_id,0) as lot_id
+              from resto.production_item
+             where production_id=%s;
+        """, (int(pid),)) or []
+
+        for it in itens:
+            ing_id = int(it["ingredient_id"])
+            q      = float(it["qty"] or 0.0)
+            c      = float(it.get("unit_cost") or 0.0)
+            ref    = int(it["id"])
+            lot_id = int(it.get("lot_id") or 0)
+            in_note = f"revert:production:{pid}" + (f";lot:{lot_id}" if lot_id else "")
+            try:
+                qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'production_revert',%s,%s);",
+                      (ing_id, q, c, ref, in_note))
+            except Exception:
+                return False, f"Falha ao estornar insumo (ingredient_id={ing_id})."
+
+        # 3) marca como cancelada
+        qexec("update resto.production set status='CANCELADA', canceled_at=now(), cancel_note=%s where id=%s;",
+              ((note or None), int(pid)))
+
+        return True, f"Produção #{pid} cancelada e estoques estornados."
+
+    # ---------- UI ----------
+    header("⛔ Cancelar produção", "Estorna o estoque e marca a ordem como CANCELADA.")
+
+    # Lista recentes (limpa e compatível com bases antigas)
+    rows = qall("""
+        select p.id,
+               p.date::date          as data,
+               pr.name               as produto,
+               coalesce(p.qty,0)     as qtd_final,
+               coalesce(p.unit_cost,0) as custo_unit,
+               coalesce(p.total_cost,0) as custo_total,
+               coalesce(p.status,'FECHADA') as status
+          from resto.production p
+          join resto.product pr on pr.id = p.product_id
+         order by p.id desc
+         limit 100;
+    """) or []
+
+    card_start()
+    st.subheader("Produções recentes")
+    df_list = pd.DataFrame(rows)
+    if df_list.empty:
+        st.info("Nenhuma produção encontrada.")
+        card_end()
+        return
+
+    st.dataframe(df_list, use_container_width=True, hide_index=True)
+
+    # Filtros simples
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        only_open = st.checkbox("Mostrar apenas NÃO canceladas", value=True)
+    with c2:
+        pid_opt = [
+            (int(r["id"]), f"#{int(r['id'])} • {r['data']} • {r['produto']} • {r['status']}")
+            for _, r in df_list.iterrows()
+            if not (only_open and str(r.get("status","")).upper() == "CANCELADA")
+        ]
+        sel = st.selectbox("Escolha a produção", options=pid_opt,
+                           format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+
+    if not sel:
+        card_end()
+        return
+
+    sel_id = int(sel[0])
+
+    # Detalhe (mostra insumos)
+    itens = qall("""
+        select pi.id, pr.name as ingrediente, pi.qty, pi.unit_cost, pi.total_cost, pi.lot_id
+          from resto.production_item pi
+          join resto.product pr on pr.id = pi.ingredient_id
+         where pi.production_id=%s
+         order by pi.id;
+    """, (sel_id,)) or []
+    st.markdown("#### Insumos consumidos")
+    st.dataframe(pd.DataFrame(itens), use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.warning("⚠️ Esta ação estorna o estoque (produto final sai, insumos retornam) e marca a produção como **CANCELADA**.")
+    motivo = st.text_input("Motivo (opcional)")
+    if st.button("⛔ Cancelar esta produção agora"):
+        ok, msg = _cancel_production(sel_id, motivo)
+        if ok:
+            st.success(msg)
+            _rerun()
+        else:
+            st.error(msg)
+
+    card_end()
 
 
 
@@ -4113,7 +4268,7 @@ def main():
             # logo="https://seu-dominio.com/logo.png",  # URL externa
             logo_height=92
         )
-    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Estoque", "Financeiro","Agenda de Contas","Relatórios","Importar Extrato"], index=0)
+    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Cancelar produção","Estoque", "Financeiro","Agenda de Contas","Relatórios","Importar Extrato"], index=0)
 
     if page == "Painel": page_dashboard()
     elif page == "Cadastros": page_cadastros()
@@ -4121,6 +4276,7 @@ def main():
     elif page == "Vendas": page_vendas()
     elif page == "Receitas & Preços": page_receitas_precos()
     elif page == "Produção": page_producao()
+    elif page == "Cancelar produção": page_producao_cancelar()
     elif page == "Estoque": page_estoque()
     elif page == "Financeiro": page_financeiro()
     elif page == "Agenda de Contas": page_agenda_contas()   # <— NOVO
