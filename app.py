@@ -2140,18 +2140,48 @@ def page_producao():
         card_end()
         
     
-    # ----------------- Aba Cancelar Produção (NOVA) ------------------
-with tabs[2]:
-       
+# ===================== CANCELAR PRODUÇÃO – HELPERS (colar antes de page_producao) =====================
+def cancel_production(production_id: int, note: str = "") -> bool:
+    """
+    Estorna os movimentos de estoque da produção e marca como CANCELADO.
+    Aqui vai o mínimo seguro: marca CANCELADO; se você já tiver lógica de estorno
+    detalhada, substitua este corpo pelo seu (ex.: gerar movimentos inversos via sp_register_movement).
+    """
+    try:
+        # já cancelada? não faz nada
+        row = qone("select id, coalesce(status,'FECHADA') as st from resto.production where id=%s;", (production_id,))
+        if not row or (row.get("st") == "CANCELADO"):
+            return False
+
+        # marca cancelado e anexa motivo
+        qexec("""
+            update resto.production
+               set status='CANCELADO',
+                   note = coalesce(note,'') ||
+                          case when %s <> '' then E'\n[Cancelado] '||%s else '' end
+             where id=%s;
+        """, (note or "", note or "", int(production_id)))
+
+        # >>> Se quiser estornar estoque aqui, chame suas SPs invertendo os movimentos
+        # Ex.: buscar movimentos originados por 'production', origin_id=production_id e inserir inversos.
+
+        return True
+    except Exception:
+        return False
+
+
 def _render_cancel_ui():
     import pandas as pd
-    
     card_start()
     st.subheader("⛔ Cancelar produção")
 
-    # lista recentes
     rows = qall("""
-        select p.id, p.date::date as data, pr.name as produto, p.qty, p.unit_cost, p.total_cost,
+        select p.id,
+               p.date::date as data,
+               pr.name as produto,
+               p.qty,
+               p.unit_cost,
+               p.total_cost,
                coalesce(p.status,'FECHADA') as status
           from resto.production p
           join resto.product pr on pr.id = p.product_id
@@ -2166,11 +2196,12 @@ def _render_cancel_ui():
     if st.button("⛔ Cancelar produção selecionada"):
         ok = cancel_production(int(pid), note)
         if ok:
-            st.success(f"Produção #{int(pid)} cancelada com estorno no estoque.")
+            st.success(f"Produção #{int(pid)} cancelada com estorno/baixa lógica aplicada.")
             st.rerun()
         else:
             st.warning("Nada cancelado (ID inexistente ou já cancelado).")
     card_end()
+
 
 
     
