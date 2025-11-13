@@ -4142,7 +4142,7 @@ def page_producao_cancelar():
         qty_final = float(p.get("qty") or 0.0)
         prod_id   = int(p["product_id"])
 
-        -- saída do produto final
+       # -- saída do produto final
         out_note = 'revert:production:' || %s;
 
         begin
@@ -4152,7 +4152,7 @@ def page_producao_cancelar():
           return False, "Falha ao registrar saída do produto acabado.";
         end;
 
-        -- devolução de insumos
+       # -- devolução de insumos
         itens := (
           select id, ingredient_id, qty, unit_cost, coalesce(lot_id,0) as lot_id
             from resto.production_item
