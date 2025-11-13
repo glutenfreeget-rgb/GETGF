@@ -4735,7 +4735,7 @@ def main():
     if page == "Painel": page_dashboard()
     elif page == "Cadastros": page_cadastros()
     elif page == "Compras": page_compras()
-    elif page == "Lista de Compras": page_agenda_contas()   # <— NOVO
+    elif page == "Lista de Compras": page_lista_compras()   # <— NOVO
     elif page == "Vendas": page_vendas()
     elif page == "Receitas & Preços": page_receitas_precos()
     elif page == "Produção": page_producao()
