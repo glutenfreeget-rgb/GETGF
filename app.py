@@ -1568,32 +1568,8 @@ def page_producao():
     prod_id = prod[0]
     prod_row = next((r for r in prods if r["id"] == prod_id), {"unit": "un", "last_cost": 0})
     #tabs = st.tabs(["Saldos", "Movimentos", "Lotes & Validade", "Cadastro"])
-   #tabs = st.tabs(["🛠️ Nova produção", "📜 Ficha técnica (receita)", "⛔ Cancelar produção"])
-    # ... (seu código anterior dentro de page_producao) ...
-
-    # As três abas da página de produção:
-    tabs = st.tabs([
-        "🛠️ Nova produção",
-        "📜 Ficha técnica (receita)",
-        "⛔ Cancelar produção"
-    ])
-
-    # ---------------- Aba 0: Nova produção ----------------
-    with tabs[0]:
-        # >>> mantenha aqui o SEU código da "Nova produção" exatamente como já estava
-        # (não copie 'return' para fora da função)
-        pass  # remova este pass e deixe seu bloco original
-
-    # ---------------- Aba 1: Ficha técnica ----------------
-    with tabs[1]:
-        # >>> mantenha aqui o SEU código da "Ficha técnica (receita)" exatamente como já estava
-        # (sem returns fora da função)
-        pass  # remova este pass e deixe seu bloco original
-
-    # ---------------- Aba 2: Cancelar produção ----------------
-    with tabs[2]:
-        _render_cancel_ui()
-
+   tabs = st.tabs(["🛠️ Nova produção", "📜 Ficha técnica (receita)"])
+ 
     # ==================== Aba Ficha Técnica (FORMULÁRIO ÚNICO) ====================
     with tabs[1]:
         card_start()
