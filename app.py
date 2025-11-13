@@ -4125,56 +4125,66 @@ def page_producao_cancelar():
     end $$;
     """)
 
-    # estorno de produção
-    def _cancel_production(pid: int, note: str = "") -> tuple[bool, str]:
-        p = qone("""
-            select p.*, pr.name as product_name
-              from resto.production p
-              join resto.product pr on pr.id = p.product_id
-             where p.id=%s;
-        """, (int(pid),))
-        if not p:
-            return False, "Produção não encontrada."
-
-        if (p.get("status") or "").upper() == "CANCELADA":
-            return False, "Esta produção já está CANCELADA."
-
-        qty_final = float(p.get("qty") or 0.0)
-        prod_id   = int(p["product_id"])
-
-        # 1) reverte entrada do produto final
-        out_note = f"revert:production:{pid}"
+    # estorno de produção (feito em Python, chamando a SP de movimento)
+    def _cancel_production(pid: int, note: str = ""):
         try:
-            qexec("select resto.sp_register_movement(%s,'OUT',%s,null,'production_revert',%s,%s);",
-                  (prod_id, qty_final, int(pid), out_note))
-        except Exception:
-            return False, "Falha ao registrar saída do produto acabado."
+            p = qone("""
+                select p.*, pr.name as product_name
+                  from resto.production p
+                  join resto.product pr on pr.id = p.product_id
+                 where p.id=%s;
+            """, (int(pid),))
+            if not p:
+                return False, "Produção não encontrada."
 
-        # 2) devolve insumos (usa itens ATUAIS do lote)
-        itens = qall("""
-            select id, ingredient_id, qty, unit_cost, coalesce(lot_id,0) as lot_id
-              from resto.production_item
-             where production_id=%s;
-        """, (int(pid),)) or []
+            if (p.get("status") or "").upper() == "CANCELADA":
+                return False, "Esta produção já está CANCELADA."
 
-        for it in itens:
-            ing_id = int(it["ingredient_id"])
-            q      = float(it["qty"] or 0.0)
-            c      = float(it.get("unit_cost") or 0.0)
-            ref    = int(it["id"])
-            lot_id = int(it.get("lot_id") or 0)
-            in_note = f"revert:production:{pid}" + (f";lot:{lot_id}" if lot_id else "")
+            qty_final = float(p.get("qty") or 0.0)
+            prod_id   = int(p["product_id"])
+            out_note  = f"revert:production:{int(pid)}"
+
+            # 1) Saída do produto final (remove o que entrou na produção)
+            #    unit_cost: usamos o custo unitário aplicado no cabeçalho (se houver), senão NULL
+            uc = p.get("unit_cost")
+            uc_param = float(uc) if uc is not None else None
             try:
-                qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'production_revert',%s,%s);",
-                      (ing_id, q, c, ref, in_note))
+                qexec(
+                    "select resto.sp_register_movement(%s,'OUT',%s,%s,'production_revert',%s,%s);",
+                    (prod_id, qty_final, uc_param, int(pid), out_note),
+                )
             except Exception:
-                return False, f"Falha ao estornar insumo (ingredient_id={ing_id})."
+                return False, "Falha ao registrar saída do produto acabado."
 
-        # 3) marca como cancelada
-        qexec("update resto.production set status='CANCELADA', canceled_at=now(), cancel_note=%s where id=%s;",
-              ((note or None), int(pid)))
+            # 2) Devolução dos insumos (IN) – usa a lista atual de itens do lote
+            items = qall("""
+                select id, ingredient_id, qty, unit_cost, lot_id
+                  from resto.production_item
+                 where production_id=%s
+                 order by id;
+            """, (int(pid),)) or []
 
-        return True, f"Produção #{pid} cancelada e estoques estornados."
+            for it in items:
+                ing_id = int(it["ingredient_id"])
+                qty    = float(it.get("qty") or 0.0)
+                uc_i   = it.get("unit_cost")
+                uc_i   = float(uc_i) if uc_i is not None else None
+                lot_id = it.get("lot_id")
+                note_item = f"revert:production:{int(pid)}" + (f";lot:{int(lot_id)}" if lot_id else "")
+                qexec(
+                    "select resto.sp_register_movement(%s,'IN',%s,%s,'production_revert',%s,%s);",
+                    (ing_id, qty, uc_i, int(it["id"]), note_item),
+                )
+
+            # 3) Marca o cabeçalho como cancelado
+            qexec(
+                "update resto.production set status='CANCELADA', canceled_at=now(), cancel_note=%s where id=%s;",
+                (note or None, int(pid)),
+            )
+
+            return True, f"Produção #{int(pid)} cancelada e estoques estornados."
+        except Exception:
+            return False, "Erro inesperado ao cancelar a produção."
 
     # ---------- UI ----------
     header("⛔ Cancelar produção", "Ajuste os itens do lote (se necessário) e cancele com estorno de estoque.")
@@ -4182,11 +4192,11 @@ def page_producao_cancelar():
     # lista recentes
     rows = qall("""
         select p.id,
-               p.date::date              as data,
-               pr.name                   as produto,
-               coalesce(p.qty,0)         as qtd_final,
-               coalesce(p.unit_cost,0)   as custo_unit,
-               coalesce(p.total_cost,0)  as custo_total,
+               p.date::date                 as data,
+               pr.name                      as produto,
+               coalesce(p.qty,0)            as qtd_final,
+               coalesce(p.unit_cost,0)      as custo_unit,
+               coalesce(p.total_cost,0)     as custo_total,
                coalesce(p.status,'FECHADA') as status
           from resto.production p
           join resto.product pr on pr.id = p.product_id
@@ -4226,12 +4236,20 @@ def page_producao_cancelar():
     st.markdown("### ✏️ Editar itens do lote")
     st.caption("As alterações **não mexem no estoque agora**; o estoque só muda quando você clicar **Cancelar produção**.")
 
-    # base de itens (antes da edição) e soma original p/ fator
+    # soma original p/ fator de cabeçalho
     orig_sum_row = qone("select coalesce(sum(total_cost),0) s from resto.production_item where production_id=%s;", (sel_id,))
     orig_sum = float((orig_sum_row or {}).get("s") or 0.0)
 
     itens = qall("""
-        select pi.id, pr.name as ingrediente, pi.qty, pi.unit_cost, pi.total_cost, pi.lot_id, pi.ingredient_id
+        select
+            pi.id,
+            pr.name        as ingrediente,
+            pr.unit        as unidade,         -- unidade do insumo (do cadastro)
+            pi.qty,
+            pi.unit_cost,
+            pi.total_cost,
+            pi.lot_id,
+            pi.ingredient_id
           from resto.production_item pi
           join resto.product pr on pr.id = pi.ingredient_id
          where pi.production_id=%s
@@ -4246,6 +4264,7 @@ def page_producao_cancelar():
         cfg = {
             "id":            st.column_config.NumberColumn("ID", disabled=True),
             "ingrediente":   st.column_config.TextColumn("Ingrediente", disabled=True),
+            "unidade":       st.column_config.TextColumn("Unidade", disabled=True),   # coluna unidade no grid
             "qty":           st.column_config.NumberColumn("Quantidade", step=0.001, format="%.3f"),
             "unit_cost":     st.column_config.NumberColumn("Custo unitário", step=0.01, format="%.4f"),
             "total_cost":    st.column_config.NumberColumn("Subtotal", disabled=True, format="%.2f"),
@@ -4254,7 +4273,7 @@ def page_producao_cancelar():
             "Excluir?":      st.column_config.CheckboxColumn("Excluir?"),
         }
         edited = st.data_editor(
-            df[["id","ingrediente","qty","unit_cost","total_cost","lot_id","ingredient_id","Excluir?"]],
+            df[["id","ingrediente","unidade","qty","unit_cost","total_cost","lot_id","ingredient_id","Excluir?"]],
             column_config=cfg, hide_index=True, num_rows="fixed",
             key=f"edit_items_{sel_id}", use_container_width=True
         )
@@ -4265,7 +4284,7 @@ def page_producao_cancelar():
         with cB:
             do_reload = st.button("🔄 Recarregar", key=f"reload_items_{sel_id}")
         with cC:
-            st.caption("Dica: editar **Quantidade** e **Custo unitário**. Use **Excluir?** para remover o item.")
+            st.caption("Edite **Quantidade** e **Custo unitário**; **Unidade** é do cadastro do insumo.")
 
         if do_reload:
             _rerun()
@@ -4276,7 +4295,8 @@ def page_producao_cancelar():
             upd = delc = err = 0
 
             # deletar marcados
-            for iid in new.index[new["Excluir?"] == True].tolist():
+            to_del = new.index[new["Excluir?"] == True].tolist()
+            for iid in to_del:
                 try:
                     qexec("delete from resto.production_item where id=%s;", (int(iid),))
                     delc += 1
@@ -4284,10 +4304,9 @@ def page_producao_cancelar():
                     err += 1
 
             # atualizar alterados
-            keep = [i for i in new.index if i not in new.index[new["Excluir?"] == True].tolist()]
+            keep = [i for i in new.index if i not in to_del]
             for iid in keep:
                 a = orig.loc[iid]; b = new.loc[iid]
-                # detecta mudança em qty/unit_cost
                 changed = (float(a.get("qty") or 0) != float(b.get("qty") or 0)) or \
                           (float(a.get("unit_cost") or 0) != float(b.get("unit_cost") or 0))
                 if not changed:
@@ -4320,7 +4339,6 @@ def page_producao_cancelar():
             try:
                 qexec("update resto.production set total_cost=%s, unit_cost=%s where id=%s;", (new_total, new_unit, sel_id))
             except Exception:
-                # se não conseguir atualizar cabeçalho, segue mesmo assim
                 pass
 
             st.success(f"Itens: ✅ {upd} atualizado(s) • 🗑️ {delc} excluído(s) • ⚠️ {err} erro(s).")
@@ -4328,11 +4346,15 @@ def page_producao_cancelar():
 
     # ---------- adicionar novo item ao lote ----------
     st.markdown("### ➕ Adicionar item ao lote")
-    prods_ing = qall("select id, name from resto.product where coalesce(is_ingredient,true) is true and coalesce(active,true) is true order by name;") or \
-                qall("select id, name from resto.product order by name;") or []
-    opts_ing = [(r["id"], r["name"]) for r in prods_ing]
+    prods_ing = qall("""
+        select id, name, unit
+          from resto.product
+         where coalesce(is_ingredient,true) is true and coalesce(active,true) is true
+         order by name;
+    """) or qall("select id, name, unit from resto.product order by name;") or []
+    opts_ing = [(r["id"], f"{r['name']} [{r.get('unit') or 'un'}]") for r in prods_ing]
 
-    c1, c2, c3, _ = st.columns([2,1,1,1])
+    c1, c2, c3 = st.columns([2,1,1])
     with c1:
         novo_ing = st.selectbox("Ingrediente", options=opts_ing,
                                 format_func=lambda x: x[1] if isinstance(x, tuple) else x,
@@ -4354,10 +4376,7 @@ def page_producao_cancelar():
             # atualiza cabeçalho mantendo fator
             hdr = qone("select coalesce(total_cost,0) as tot, coalesce(qty,0) as qty from resto.production where id=%s;", (sel_id,))
             prev_total = float((hdr or {}).get("tot") or 0.0)
-            # soma antiga (antes da inclusão)
-            old_sum_row = qone("select coalesce(sum(total_cost),0) s from resto.production_item where production_id=%s;", (sel_id,))
-            # esse select já pega COM o novo item; então calcule old_sum = new_sum - tcost
-            new_sum_all = float((old_sum_row or {}).get("s") or 0.0)
+            new_sum_all = float(qone("select coalesce(sum(total_cost),0) s from resto.production_item where production_id=%s;", (sel_id,))["s"] or 0.0)
             old_sum = max(new_sum_all - tcost, 0.0)
             factor = (prev_total / old_sum) if old_sum > 0 else 1.0
             new_total = new_sum_all * factor
@@ -4386,6 +4405,7 @@ def page_producao_cancelar():
             st.error(msg)
 
     card_end()
+
 
 
 
