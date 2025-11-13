@@ -2118,7 +2118,7 @@ def page_producao():
     
     # ----------------- Aba Cancelar Produção (NOVA) ------------------
 with tabs[2]:
-        _render_cancel_ui()
+       
 def _render_cancel_ui():
     import pandas as pd
     
