@@ -222,6 +222,88 @@ def _record_cashbook_out_from_purchase(purchase_id: int, method: str, entry_date
         values (%s,'OUT',%s,%s,%s,%s);
     """, (entry_date, cat_id, desc, total, method))
 
+# ===================== CANCELAR PRODUÇÃO (estorno) =====================
+def _ensure_production_cancel_schema():
+    qexec("""
+    do $$
+    begin
+      if not exists (
+        select 1 from information_schema.columns
+         where table_schema='resto' and table_name='production' and column_name='status'
+      ) then
+        alter table resto.production add column status text default 'FECHADA';
+      end if;
+
+      if not exists (
+        select 1 from information_schema.columns
+         where table_schema='resto' and table_name='production' and column_name='cancelled_at'
+      ) then
+        alter table resto.production add column cancelled_at timestamptz;
+      end if;
+
+      if not exists (
+        select 1 from information_schema.columns
+         where table_schema='resto' and table_name='production' and column_name='cancel_note'
+      ) then
+        alter table resto.production add column cancel_note text;
+      end if;
+    end $$;
+    """)
+
+def cancel_production(production_id: int, note: str = "") -> bool:
+    """
+    Estorna uma produção:
+      - IN dos ingredientes (devolve ao estoque)
+      - OUT do produto final (retira o que entrou)
+      - Marca production.status='CANCELADO'
+    Retorna True se cancelou; False se já estava cancelada ou não existe.
+    """
+    _ensure_production_cancel_schema()
+
+    p = qone("""
+        select id, product_id, qty, unit_cost, coalesce(status,'FECHADA') as status
+          from resto.production
+         where id=%s;
+    """, (int(production_id),))
+    if not p or p["status"] == "CANCELADO":
+        return False
+
+    # 1) Reverte ingredientes: OUT original -> IN de estorno
+    items = qall("""
+        select id, ingredient_id, qty, unit_cost
+          from resto.production_item
+         where production_id=%s
+         order by id;
+    """, (int(production_id),)) or []
+
+    for it in items:
+        # source='prod_cancel', source_id=item.id, note referencia a produção original
+        qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'prod_cancel',%s,%s);",
+              (int(it["ingredient_id"]),
+               float(it["qty"]),
+               float(it["unit_cost"]),
+               int(it["id"]),
+               f"reverso production:{production_id}"))
+
+    # 2) Reverte produto final: IN original -> OUT de estorno
+    qexec("select resto.sp_register_movement(%s,'OUT',%s,%s,'prod_cancel',%s,%s);",
+          (int(p["product_id"]),
+           float(p["qty"]),
+           float(p["unit_cost"]),
+           int(p["id"]),
+           f"reverso production:{production_id}"))
+
+    # 3) Marca produção como cancelada (mantém rastreabilidade)
+    qexec("""
+        update resto.production
+           set status='CANCELADO',
+               cancel_note=%s,
+               cancelled_at=now()
+         where id=%s;
+    """, (note or "", int(production_id)))
+
+    return True
+
 # ===================== UI Helpers =====================
 def header(title: str, subtitle: str = "", logo: str | None = None, logo_height: int = 56):
     import base64, mimetypes, os
@@ -2033,6 +2115,33 @@ def page_producao():
 
         card_end()
 
+def _render_cancel_ui():
+    import pandas as pd
+    card_start()
+    st.subheader("⛔ Cancelar produção")
+
+    # lista recentes
+    rows = qall("""
+        select p.id, p.date::date as data, pr.name as produto, p.qty, p.unit_cost, p.total_cost,
+               coalesce(p.status,'FECHADA') as status
+          from resto.production p
+          join resto.product pr on pr.id = p.product_id
+         order by p.id desc
+         limit 50;
+    """) or []
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    pid = st.number_input("ID da produção para cancelar", min_value=1, step=1)
+    note = st.text_input("Motivo (opcional)")
+
+    if st.button("⛔ Cancelar produção selecionada"):
+        ok = cancel_production(int(pid), note)
+        if ok:
+            st.success(f"Produção #{int(pid)} cancelada com estorno no estoque.")
+            st.rerun()
+        else:
+            st.warning("Nada cancelado (ID inexistente ou já cancelado).")
+    card_end()
 
 
     
