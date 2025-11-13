@@ -4406,6 +4406,313 @@ def page_producao_cancelar():
 
     card_end()
 
+# =================================== LISTA DE COMPRAS ===================================
+def page_lista_compras():
+    import pandas as pd
+    from io import BytesIO
+    from datetime import date
+
+    # ---------- helpers ----------
+    def _rerun():
+        try:
+            st.rerun()
+        except Exception:
+            if hasattr(st, "experimental_rerun"):
+                st.experimental_rerun()
+
+    def _ensure_schema():
+        # Tabela única e simples p/ lista de compras
+        qexec("""
+        do $$
+        begin
+          create table if not exists resto.shopping_item(
+            id          bigserial primary key,
+            product_id  bigint references resto.product(id),
+            name        text not null,
+            qty         numeric(14,3) not null default 1,
+            unit        text,
+            checked     boolean not null default false,
+            note        text,
+            created_at  timestamptz not null default now()
+          );
+          create index if not exists shop_checked_idx on resto.shopping_item(checked);
+          create index if not exists shop_created_idx on resto.shopping_item(created_at);
+        end $$;
+        """)
+
+    def _build_pdf(rows, titulo="Lista de Compras", subtitulo="", landscape_flag=False, show_checkboxes=True):
+        # Gera um PDF simples com tabela
+        try:
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+            from reportlab.lib.pagesizes import A4, landscape, portrait
+            from reportlab.lib.styles import getSampleStyleSheet
+            from reportlab.lib import colors
+        except Exception:
+            return None, "ReportLab não está disponível neste ambiente. Instale o pacote para gerar PDF."
+
+        buffer = BytesIO()
+        pagesize = landscape(A4) if landscape_flag else portrait(A4)
+
+        doc = SimpleDocTemplate(buffer, pagesize=pagesize,
+                                leftMargin=24, rightMargin=24, topMargin=28, bottomMargin=24)
+        styles = getSampleStyleSheet()
+        story = []
+
+        title = Paragraph(f"<b>{titulo}</b>", styles["Title"])
+        story.append(title)
+        if subtitulo:
+            story.append(Paragraph(subtitulo, styles["Normal"]))
+        story.append(Spacer(1, 10))
+
+        # Monta dados da tabela
+        th = ["", "Item", "Qtd", "Un", "Obs"] if show_checkboxes else ["Item", "Qtd", "Un", "Obs"]
+        data = [th]
+
+        for r in rows:
+            nome = r.get("name") or ""
+            qtd  = float(r.get("qty") or 0)
+            un   = r.get("unit") or ""
+            obs  = r.get("note") or ""
+            box  = "☐" if show_checkboxes else None
+            row = ([box, nome, f"{qtd:.3f}", un, obs] if show_checkboxes
+                   else [nome, f"{qtd:.3f}", un, obs])
+            data.append(row)
+
+        tbl = Table(data, repeatRows=1)
+        base_style = [
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, 0), 10),
+            ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+            ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("FONTSIZE", (0, 1), (-1, -1), 9),
+            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]
+        tbl.setStyle(TableStyle(base_style))
+        story.append(tbl)
+
+        story.append(Spacer(1, 8))
+        story.append(Paragraph(f"Gerado em {date.today().strftime('%d/%m/%Y')}", styles["Normal"]))
+
+        try:
+            doc.build(story)
+            pdf = buffer.getvalue()
+            buffer.close()
+            return pdf, None
+        except Exception:
+            return None, "Falha ao montar o PDF."
+
+    _ensure_schema()
+
+    header("🛒 Lista de Compras", "Marque, edite e gere um PDF para impressão.")
+
+    # -------- Adicionar itens --------
+    card_start()
+    st.subheader("➕ Adicionar item")
+
+    # Carrega produtos (opcional, para autopreencher nome/unidade)
+    prods = qall("select id, name, unit from resto.product where coalesce(active,true) is true order by name;") or []
+    prod_opts = [(p["id"], f"{p['name']} [{p.get('unit') or 'un'}]") for p in prods]
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        prod_sel = st.selectbox("Produto (opcional)", options=[(0, "— usar nome livre —")] + prod_opts,
+                                format_func=lambda x: x[1] if isinstance(x, tuple) else x)
+    with c2:
+        nome_livre = st.text_input("Nome livre (se não usar produto)")
+
+    c3, c4, c5 = st.columns([1, 1, 2])
+    with c3:
+        qty_new = st.number_input("Quantidade", min_value=0.001, step=0.001, value=1.000, format="%.3f")
+    with c4:
+        # unidade padrão do produto, se houver
+        default_unit = ""
+        if isinstance(prod_sel, tuple) and prod_sel[0] != 0:
+            try:
+                prow = next((r for r in prods if r["id"] == prod_sel[0]), None)
+                default_unit = (prow or {}).get("unit") or ""
+            except Exception:
+                pass
+        unit_new = st.text_input("Unidade", value=default_unit)
+    with c5:
+        note_new = st.text_input("Observação", value="")
+
+    add_btn = st.button("Adicionar à lista")
+    if add_btn:
+        if (isinstance(prod_sel, tuple) and prod_sel[0] != 0):
+            # via produto
+            pid = int(prod_sel[0])
+            prow = next((r for r in prods if r["id"] == pid), {})
+            name = prow.get("name") or nome_livre or ""
+            if not name:
+                st.warning("Informe um nome para o item.")
+            else:
+                qexec("""
+                    insert into resto.shopping_item(product_id, name, qty, unit, note)
+                    values (%s,%s,%s,%s,%s);
+                """, (pid, name, float(qty_new), (unit_new or None), (note_new or None)))
+                st.success("Item adicionado.")
+                _rerun()
+        else:
+            # nome livre
+            if not (nome_livre or "").strip():
+                st.warning("Informe um nome para o item (ou escolha um produto).")
+            else:
+                qexec("""
+                    insert into resto.shopping_item(product_id, name, qty, unit, note)
+                    values (null,%s,%s,%s,%s);
+                """, (nome_livre.strip(), float(qty_new), (unit_new or None), (note_new or None)))
+                st.success("Item adicionado.")
+                _rerun()
+
+    card_end()
+
+    # -------- Grid de edição / checklist --------
+    card_start()
+    st.subheader("Lista atual")
+
+    # filtros simples
+    fcol1, fcol2, fcol3 = st.columns([1,1,2])
+    with fcol1:
+        f_show_only_open = st.checkbox("Mostrar somente não ticados", value=False)
+    with fcol2:
+        f_order = st.selectbox("Ordenar por", ["status/nome", "nome", "criação decresc."], index=0)
+    with fcol3:
+        f_text = st.text_input("Buscar por nome/obs", value="")
+
+    wh = []
+    pr = []
+    if f_show_only_open:
+        wh.append("checked is false")
+    if f_text.strip():
+        wh.append("(name ilike %s or coalesce(note,'') ilike %s)")
+        pr += [f"%{f_text.strip()}%", f"%{f_text.strip()}%"]
+
+    sql = "select id, product_id, name, qty, coalesce(unit,'') as unit, checked, coalesce(note,'') as note from resto.shopping_item"
+    if wh:
+        sql += " where " + " and ".join(wh)
+
+    if f_order == "status/nome":
+        sql += " order by checked asc, name asc"
+    elif f_order == "nome":
+        sql += " order by name asc"
+    else:
+        sql += " order by created_at desc"
+
+    rows = qall(sql + ";", tuple(pr)) or []
+    df = pd.DataFrame(rows)
+
+    if df.empty:
+        st.caption("Nenhum item na lista.")
+        card_end()
+    else:
+        df["Excluir?"] = False
+        colcfg = {
+            "checked":   st.column_config.CheckboxColumn("✓"),
+            "name":      st.column_config.TextColumn("Item"),
+            "qty":       st.column_config.NumberColumn("Qtd", step=0.001, format="%.3f"),
+            "unit":      st.column_config.TextColumn("Un"),
+            "note":      st.column_config.TextColumn("Obs"),
+            "Excluir?":  st.column_config.CheckboxColumn("Excluir?"),
+            "id":        st.column_config.NumberColumn("ID", disabled=True),
+            "product_id":st.column_config.NumberColumn("product_id", disabled=True),
+        }
+        edited = st.data_editor(
+            df[["id","checked","name","qty","unit","note","Excluir?","product_id"]],
+            hide_index=True, num_rows="fixed", use_container_width=True,
+            column_config=colcfg, key="shop_grid"
+        )
+
+        cA, cB, cC, cD = st.columns([1.4,1.4,1.4,2])
+        with cA:
+            do_save = st.button("💾 Salvar alterações")
+        with cB:
+            do_del  = st.button("🗑️ Excluir selecionados")
+        with cC:
+            do_clear = st.button("🧹 Limpar TUDO")
+        with cD:
+            st.caption("Dica: marque ✓ para itens comprados (fica registrado).")
+
+        if do_save:
+            orig = df.set_index("id")
+            new  = edited.set_index("id")
+            upd = 0; err = 0
+            for iid in new.index.tolist():
+                a = orig.loc[iid]; b = new.loc[iid]
+                changed = any([
+                    bool(a.get("checked")) != bool(b.get("checked")),
+                    str(a.get("name","")) != str(b.get("name","")),
+                    float(a.get("qty") or 0) != float(b.get("qty") or 0),
+                    str(a.get("unit","")) != str(b.get("unit","")),
+                    str(a.get("note","")) != str(b.get("note",""))
+                ])
+                if not changed:
+                    continue
+                try:
+                    qexec("""
+                        update resto.shopping_item
+                           set checked=%s, name=%s, qty=%s, unit=%s, note=%s
+                         where id=%s;
+                    """, (bool(b.get("checked")), str(b.get("name") or ""),
+                          float(b.get("qty") or 0.0), (str(b.get("unit") or "") or None),
+                          (str(b.get("note") or "") or None), int(iid)))
+                    upd += 1
+                except Exception:
+                    err += 1
+            st.success(f"✅ {upd} atualizado(s) • ⚠️ {err} erro(s).")
+            _rerun()
+
+        if do_del:
+            new = edited.set_index("id")
+            to_del = [int(i) for i in new.index.tolist() if bool(new.loc[i, "Excluir?"])]
+            ok = bad = 0
+            for iid in to_del:
+                try:
+                    qexec("delete from resto.shopping_item where id=%s;", (iid,))
+                    ok += 1
+                except Exception:
+                    bad += 1
+            st.success(f"🗑️ {ok} removido(s) • ⚠️ {bad} erro(s).")
+            _rerun()
+
+        if do_clear:
+            qexec("delete from resto.shopping_item;", ())
+            st.info("Lista esvaziada.")
+            _rerun()
+
+        card_end()
+
+        # -------- PDF --------
+        card_start()
+        st.subheader("📄 Gerar PDF")
+        g1, g2, g3 = st.columns([1.2,1.2,2])
+        with g1:
+            pdf_only_open = st.checkbox("Somente não ticados", value=True)
+        with g2:
+            pdf_land = st.checkbox("Paisagem (horizontal)", value=False)
+        with g3:
+            pdf_boxes = st.checkbox("Mostrar caixas de seleção no PDF", value=True)
+
+        # prepara base
+        base = edited if pdf_only_open else edited.copy()
+        if pdf_only_open:
+            base = base[base["checked"] == False]
+        base = base[["name","qty","unit","note"]].sort_values("name")
+
+        if st.button("⬇️ Baixar PDF da lista"):
+            rows_pdf = base.to_dict(orient="records")
+            subtit = "Apenas itens não ticados" if pdf_only_open else "Todos os itens (ticados e não ticados)"
+            pdf_bytes, err_pdf = _build_pdf(rows_pdf, titulo="Lista de Compras", subtitulo=subtit,
+                                            landscape_flag=pdf_land, show_checkboxes=pdf_boxes)
+            if err_pdf:
+                st.error(err_pdf)
+            else:
+                st.download_button("⬇️ Download PDF", data=pdf_bytes, file_name="lista_compras.pdf", mime="application/pdf")
+        card_end()
 
 
 
@@ -4423,11 +4730,12 @@ def main():
             # logo="https://seu-dominio.com/logo.png",  # URL externa
             logo_height=92
         )
-    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras", "Vendas", "Receitas & Preços", "Produção", "Cancelar produção","Estoque", "Financeiro","Agenda de Contas","Relatórios","Importar Extrato"], index=0)
+    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras","Lista de Compras", "Vendas", "Receitas & Preços", "Produção", "Cancelar produção","Estoque", "Financeiro","Agenda de Contas","Relatórios","Importar Extrato"], index=0)
 
     if page == "Painel": page_dashboard()
     elif page == "Cadastros": page_cadastros()
     elif page == "Compras": page_compras()
+    elif page == "Lista de Compras": page_agenda_contas()   # <— NOVO
     elif page == "Vendas": page_vendas()
     elif page == "Receitas & Preços": page_receitas_precos()
     elif page == "Produção": page_producao()
