@@ -4741,21 +4741,21 @@ def main():
             # logo="https://seu-dominio.com/logo.png",  # URL externa
             logo_height=92
         )
-    page = st.sidebar.radio("Menu", ["Painel", "Cadastros", "Compras","Lista de Compras", "Vendas", "Receitas & Preços", "Produção", "Cancelar produção","Estoque", "Financeiro","Agenda de Contas","Relatórios","Importar Extrato"], index=0)
+    page = st.sidebar.radio("Menu", ["PAINEL", "CADASTROS", "COMPRAS","LISTA DE COMPRAS", "VENDAS", "PREÇOS", "PRODUÇÃO", "MANIPULAR PRODUÇÃO","ESTOQUE", "FINANCEIRO","AGENDA DE CONTAS A PAGAR","RELATÓRIOS","IMPORTAÇÕES BANCÁRIAS"], index=0)
 
-    if page == "Painel": page_dashboard()
-    elif page == "Cadastros": page_cadastros()
-    elif page == "Compras": page_compras()
-    elif page == "Lista de Compras": page_lista_compras()   # <— NOVO
-    elif page == "Vendas": page_vendas()
-    elif page == "Receitas & Preços": page_receitas_precos()
-    elif page == "Produção": page_producao()
-    elif page == "Cancelar produção": page_producao_cancelar()
-    elif page == "Estoque": page_estoque()
-    elif page == "Financeiro": page_financeiro()
-    elif page == "Agenda de Contas": page_agenda_contas()   # <— NOVO
-    elif page == "Relatórios": page_relatorios()
-    elif page == "Importar Extrato": page_importar_extrato()
+    if page == "PAINEL": page_dashboard()
+    elif page == "CADASTROS": page_cadastros()
+    elif page == "COMPRAS": page_compras()
+    elif page == "LISTA DE COMPRAS": page_lista_compras()   # <— NOVO
+    elif page == "VENDAS": page_vendas()
+    elif page == "PREÇOS": page_receitas_precos()
+    elif page == "PRODUÇÃO": page_producao()
+    elif page == "MANIPULAR PRODUÇÃO": page_producao_cancelar()
+    elif page == "ESTOQUE": page_estoque()
+    elif page == "FINANCEIRO": page_financeiro()
+    elif page == "AGENDA DE CONTAS A PAGAR": page_agenda_contas()   # <— NOVO
+    elif page == "RELATÓRIOS": page_relatorios()
+    elif page == "IMPORTAÇÕES BANCÁRIAS": page_importar_extrato()
 
 if __name__ == "__main__":
     main()
