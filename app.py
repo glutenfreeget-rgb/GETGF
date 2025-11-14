@@ -769,57 +769,19 @@ def page_compras():
         end $$;
         """)
 
-def _post_purchase(purchase_id: int):
-    """
-    Posta todos os itens da compra convertendo a Qtd para a unidade-base do produto
-    e ajustando o preço unitário para manter o total (qty * unit_price) constante.
-    """
-    # carrega itens + unidade do item e unidade-base do produto
-    items = qall("""
-        select
-            pi.id,
-            pi.product_id,
-            pi.qty         as qty_raw,
-            pi.unit_price  as up_raw,
-            pi.unit_id     as unit_item_id,
-            upur.abbr      as unit_item_abbr,
-            coalesce(p.unit_id, 0) as unit_prod_id,
-            uprod.abbr     as unit_prod_abbr,
-            coalesce(pi.expiry_date::text,'') as exp
-        from resto.purchase_item pi
-        join resto.product p   on p.id = pi.product_id
-        left join resto.unit upur   on upur.id   = pi.unit_id
-        left join resto.unit uprod  on uprod.id  = p.unit_id
-        where pi.purchase_id=%s;
-    """, (int(purchase_id),)) or []
-
-    # conversão simples conhecida
-    def _factor(from_abbr: str, to_abbr: str) -> float:
-        f = (from_abbr or "").strip().lower()
-        t = (to_abbr or "").strip().lower()
-        if not f or not t or f == t:
-            return 1.0
-        pairs = {
-            ("g","kg"): 1/1000, ("kg","g"): 1000,
-            ("ml","l"): 1/1000, ("l","ml"): 1000,
-        }
-        return pairs.get((f, t), 1.0)
-
-    for it in items:
-        note = f"lote:{it['id']}" + (f";exp:{it['exp']}" if it["exp"] else "")
-        # converte quantidade para a unidade do produto
-        k = _factor(it.get("unit_item_abbr",""), it.get("unit_prod_abbr",""))
-        qty_norm = float(it["qty_raw"]) * float(k)
-        # ajusta preço unitário para a unidade do produto
-        up_norm  = float(it["up_raw"]) / (k if k != 0 else 1.0)
-
-        qexec(
-            "select resto.sp_register_movement(%s,'IN',%s,%s,'purchase',%s,%s);",
-            (int(it["product_id"]), qty_norm, up_norm, int(it["id"]), note)
-        )
-
-    qexec("update resto.purchase set status='POSTADA', posted_at=now() where id=%s;", (int(purchase_id),))
-
+    def _post_purchase(purchase_id: int):
+        """Gera movimentos de estoque (IN) de todos os itens dessa compra."""
+        items = qall("""
+            select id, product_id, qty, unit_price, coalesce(expiry_date::text,'') as exp
+              from resto.purchase_item
+             where purchase_id=%s;
+        """, (int(purchase_id),)) or []
+        for it in items:
+            note = f"lote:{it['id']}" + (f";exp:{it['exp']}" if it["exp"] else "")
+            # registra IN por lote (reference_id = id do purchase_item)
+            qexec("select resto.sp_register_movement(%s,'IN',%s,%s,'purchase',%s,%s);",
+                  (int(it["product_id"]), float(it["qty"]), float(it["unit_price"]), int(it["id"]), note))
+        qexec("update resto.purchase set status='POSTADA', posted_at=now() where id=%s;", (int(purchase_id),))
 
     def _unpost_purchase(purchase_id: int):
         """Estorna (gera OUT) em todos os itens. Marca ESTORNADA."""
@@ -1809,7 +1771,6 @@ def page_producao():
                 select ri.qty,
                        coalesce(ri.conversion_factor,1) as conv,
                        ri.unit_id,
-                       p.id   as ingrediente_id,           -- << NOVO: id do insumo
                        p.name as ingrediente,
                        coalesce(p.last_cost,0) as last_cost,
                        p.unit as prod_unit
@@ -1818,116 +1779,110 @@ def page_producao():
                  where ri.recipe_id=%s
                  order by p.name;
             """, (recipe["id"],)) or []
-        
+
             import pandas as pd
             df_det = pd.DataFrame(rows)
-        
-            # mapa de unidades (id -> abbr)
-            units = qall("select id, abbr from resto.unit;") or []
-            abbr_by_id = {r["id"]: r["abbr"] for r in units}
-        
-            # conversor simples
-            def _factor(from_abbr: str, to_abbr: str) -> float:
-                f = (from_abbr or "").strip().lower()
-                t = (to_abbr or "").strip().lower()
-                if not f or not t or f == t:
-                    return 1.0
-                pairs = {
-                    ("g","kg"): 1/1000, ("kg","g"): 1000,
-                    ("ml","l"): 1/1000, ("l","ml"): 1000,
+
+            # --- normalizador de unidades + conversão robusta ---
+            def _norm_unit(u: str) -> str:
+                u = (u or "").strip().lower()
+                mapa = {
+                    "g": "g", "grama": "g", "gramas": "g",
+                    "kg": "kg", "quilo": "kg", "kilograma": "kg", "kilogramas": "kg",
+                    "ml": "ml", "mililitro": "ml", "mililitros": "ml",
+                    "l": "L", "lt": "L", "lts": "L", "litro": "L", "litros": "L",
+                    "un": "un", "unid": "un", "unidade": "un", "unidades": "un",
                 }
-                return pairs.get((f, t), 1.0)
+                return mapa.get(u, u or "")
         
-            def _fmt_qty(val):
-                s = f"{float(val):,.3f}"
-                return s.replace(",", "X").replace(".", ",").replace("X", ".")
-        
-            modo = st.radio(
-                "Usar custos de:",
-                ["Cadastro (último)", "Estoque (FIFO atual)"],
-                index=1, horizontal=True
-            )
-        
+            def _convert_qty(q, from_abbr, to_abbr):
+                fa = _norm_unit(from_abbr)
+                ta = _norm_unit(to_abbr)
+                q = float(q or 0)
+                if not fa or not ta or fa == ta:
+                    return q, False
+                pairs = {
+                    ("g", "kg"): 1/1000, ("kg", "g"): 1000,
+                    ("ml", "L"): 1/1000, ("L", "ml"): 1000,
+                }
+                factor = pairs.get((fa, ta))
+                if factor is None:
+                    # não conversível conhecido -> assume 1:1
+                    return q, False
+                return q * factor, True
+
             if not df_det.empty:
+                # unidade cadastrada no item da receita
                 df_det["Un"] = df_det["unit_id"].map(lambda x: abbr_by_id.get(x, "") if x is not None else "")
+                # quantidade efetiva (com fator)
                 df_det["qty_eff"] = df_det["qty"].astype(float) * df_det["conv"].astype(float)
-        
-                linhas = []
-                tot_fifo = 0.0
-                tot_cad  = 0.0
-        
+
+                subtot = []
+                calc_txt = []
+
+                def _fmt_qty(val):
+                    s = f"{float(val):,.3f}"
+                    return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
                 for _, r in df_det.iterrows():
-                    un_item = (r.get("Un") or "").strip()            # ex.: g, kg, ml, l, un
-                    un_prod = (r.get("prod_unit") or "").strip()     # unidade base do produto
-                    need_in_prod = float(r["qty_eff"]) * _factor(un_item, un_prod)
-        
-                    # custo "cadastro"
-                    cad_unit = float(r["last_cost"])
-                    cad_sub  = need_in_prod * cad_unit
-                    tot_cad += cad_sub
-        
-                    # custo "FIFO" (mesma lógica da Produção, sem lançar estoque)
-                    allocs = fifo_allocate(int(r["ingrediente_id"]), need_in_prod)
-                    fifo_total = sum(a["qty"] * a["unit_cost"] for a in allocs) if allocs else 0.0
-                    fifo_unit  = (fifo_total / need_in_prod) if need_in_prod > 0 else 0.0
-                    tot_fifo  += fifo_total
-        
-                    calc_fifo = (
-                        " + ".join([f"{_fmt_qty(a['qty'])} {un_prod} × {money(a['unit_cost'])}" for a in allocs])
-                        if allocs else f"{_fmt_qty(need_in_prod)} {un_prod} × {money(0)}"
-                    )
-        
-                    linhas.append({
-                        "Ingrediente": r["ingrediente"],
-                        "Qtd": float(r["qty"]),
-                        "Un": un_item or un_prod,
-                        "Fator": float(r["conv"]),
-                        "Custo (cadastro)": cad_unit,
-                        "Custo (FIFO)": fifo_unit,
-                        "Qtd na base do produto": need_in_prod,
-                        "Subtotal (cadastro)": cad_sub,
-                        "Subtotal (FIFO)": fifo_total,
-                        "Cálculo FIFO (lotes)": calc_fifo,
-                    })
-        
-                df_view = pd.DataFrame(linhas)
-        
+                    un_item = (r.get("Un") or "").strip()           # ex.: g, kg, ml, L, un
+                    un_cost = (r.get("prod_unit") or "").strip()    # unidade-base do custo do produto (p.unit)
+                    qeff = float(r["qty_eff"])
+                    last_cost = float(r["last_cost"])
+
+                    q_in_cost, changed = _convert_qty(qeff, un_item, un_cost)
+                    subtotal = q_in_cost * last_cost
+                    subtot.append(subtotal)
+
+                    if changed:
+                        calc = f"{_fmt_qty(qeff)} {un_item or un_cost} → {_fmt_qty(q_in_cost)} {un_cost} × {money(last_cost)} = {money(subtotal)}"
+                    else:
+                        # se não mudou, mostra direto na unidade de custo (ou na do item, se não houver)
+                        base_un = un_cost or un_item
+                        calc = f"{_fmt_qty(q_in_cost)} {base_un} × {money(last_cost)} = {money(subtotal)}"
+                    calc_txt.append(calc)
+
+                df_det["subtotal"] = subtot
+                df_det["Cálculo"] = calc_txt
+
+                # Tabela amigável
+                df_view = pd.DataFrame({
+                    "Ingrediente": df_det["ingrediente"],
+                    "Qtd": df_det["qty"].astype(float),
+                    "Un": df_det["Un"],
+                    "Fator": df_det["conv"].astype(float),
+                    "Custo último (R$)": df_det["last_cost"].astype(float),
+                    "Qtd efetiva": df_det["qty_eff"].astype(float),
+                    "Subtotal (R$)": df_det["subtotal"].astype(float),
+                    "Cálculo": df_det["Cálculo"],
+                })
+
                 st.markdown("### 📊 Custos por ingrediente (explicado)")
-                show_cols = [
-                    "Ingrediente","Qtd","Un","Fator",
-                    "Custo (FIFO)" if modo.endswith("FIFO atual)") else "Custo (cadastro)",
-                    "Qtd na base do produto",
-                    "Subtotal (FIFO)" if modo.endswith("FIFO atual)") else "Subtotal (cadastro)",
-                    "Cálculo FIFO (lotes)" if modo.endswith("FIFO atual)") else None
-                ]
-                show_cols = [c for c in show_cols if c]
-        
                 st.dataframe(
-                    df_view[show_cols],
+                    df_view,
                     use_container_width=True,
                     hide_index=True,
                     column_config={
                         "Qtd": st.column_config.NumberColumn("Qtd", format="%.3f"),
                         "Fator": st.column_config.NumberColumn("Fator", format="%.2f"),
-                        "Custo (cadastro)": st.column_config.NumberColumn("Custo (cadastro)", format="%.4f"),
-                        "Custo (FIFO)": st.column_config.NumberColumn("Custo (FIFO)", format="%.4f"),
-                        "Qtd na base do produto": st.column_config.NumberColumn("Qtd efetiva", format="%.3f"),
-                        "Subtotal (cadastro)": st.column_config.NumberColumn("Subtotal", format="%.2f"),
-                        "Subtotal (FIFO)": st.column_config.NumberColumn("Subtotal", format="%.2f"),
+                        "Custo último (R$)": st.column_config.NumberColumn("Custo último (R$)", format="%.2f"),
+                        "Qtd efetiva": st.column_config.NumberColumn("Qtd efetiva", format="%.3f"),
+                        "Subtotal (R$)": st.column_config.NumberColumn("Subtotal (R$)", format="%.2f"),
                     }
                 )
-        
-                # Totais conforme o modo
-                tot_ing = float(tot_fifo if modo.endswith("FIFO atual)") else tot_cad)
+
+                # Totais e explicação do lote (mesma lógica, agora com subtotais corretos)
+                tot_ing = float(df_det["subtotal"].sum())
                 over_pct = float(recipe.get("overhead_pct") or 0.0) / 100.0
                 loss_pct = float(recipe.get("loss_pct") or 0.0) / 100.0
+
                 over_val = tot_ing * over_pct
                 loss_val = (tot_ing + over_val) * loss_pct
                 batch_cost = tot_ing + over_val + loss_val
-        
+
                 yq = float(recipe.get("yield_qty") or 1.0)
                 unit_cost = batch_cost / (yq if yq > 0 else 1.0)
-        
+
                 ytxt = f"{yq:.3f}"
                 if has_yield_unit:
                     try:
@@ -1937,7 +1892,7 @@ def page_producao():
                             ytxt = f"{yq:.3f} {yabbr}"
                     except Exception:
                         pass
-        
+
                 st.markdown("#### 🧮 Resumo do lote")
                 c1, c2, c3, c4, c5 = st.columns(5)
                 with c1: st.metric("Σ Ingredientes", money(tot_ing))
@@ -1945,10 +1900,16 @@ def page_producao():
                 with c3: st.metric(f"Perdas ({loss_pct*100:.2f}%)", money(loss_val))
                 with c4: st.metric("Custo do lote", money(batch_cost))
                 with c5: st.metric("Custo unitário", money(unit_cost))
-        
-                if modo.startswith("Cadastro") and abs(tot_fifo - tot_cad) > 0.01:
-                    st.caption(f"ℹ️ Pelo FIFO atual, Σ Ingredientes seria {money(tot_fifo)} (diferença de {money(tot_fifo - tot_cad)}).")
 
+                with st.expander("Como calculamos? (passo a passo)", expanded=False):
+                    st.markdown(
+                        "- **Subtotal por item** = converte a `Qtd × Fator` para a unidade do **custo do produto** (p.unit) e multiplica por `Custo último`  \n"
+                        f"- **Total ingredientes** = soma dos subtotais = **{money(tot_ing)}**  \n"
+                        f"- **Overhead** = Total ingredientes × {over_pct*100:.2f}% = **{money(over_val)}**  \n"
+                        f"- **Perdas** = (Total ingredientes + Overhead) × {loss_pct*100:.2f}% = **{money(loss_val)}**  \n"
+                        f"- **Custo do lote** = Total ingredientes + Overhead + Perdas = **{money(batch_cost)}**  \n"
+                        f"- **Custo unitário** = Custo do lote ÷ Rendimento ({ytxt}) = **{money(unit_cost)}**"
+                    )
 
 
     # ==================== Aba Nova Produção ====================
