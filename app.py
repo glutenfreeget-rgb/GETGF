@@ -4145,7 +4145,6 @@ def page_producao_cancelar():
             out_note  = f"revert:production:{int(pid)}"
 
             # 1) Saída do produto final (remove o que entrou na produção)
-            #    unit_cost: usamos o custo unitário aplicado no cabeçalho (se houver), senão NULL
             uc = p.get("unit_cost")
             uc_param = float(uc) if uc is not None else None
             try:
@@ -4212,7 +4211,16 @@ def page_producao_cancelar():
         card_end()
         return
 
-    st.dataframe(df_list, use_container_width=True, hide_index=True)
+    st.dataframe(
+        df_list,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "qtd_final":   st.column_config.NumberColumn("qtd_final",   format="%.3f"),
+            "custo_unit":  st.column_config.NumberColumn("custo_unit",  format="%.2f"),
+            "custo_total": st.column_config.NumberColumn("custo_total", format="%.2f"),
+        }
+    )
 
     c1, c2 = st.columns([1, 2])
     with c1:
@@ -4266,7 +4274,8 @@ def page_producao_cancelar():
             "ingrediente":   st.column_config.TextColumn("Ingrediente", disabled=True),
             "unidade":       st.column_config.TextColumn("Unidade", disabled=True),   # coluna unidade no grid
             "qty":           st.column_config.NumberColumn("Quantidade", step=0.001, format="%.3f"),
-            "unit_cost":     st.column_config.NumberColumn("Custo unitário", step=0.01, format="%.4f"),
+            # <<< MOSTRAR COMO MOEDA (2 casas) >>>
+            "unit_cost":     st.column_config.NumberColumn("Custo unitário", step=0.01, format="%.2f"),
             "total_cost":    st.column_config.NumberColumn("Subtotal", disabled=True, format="%.2f"),
             "lot_id":        st.column_config.NumberColumn("Lote (id)", disabled=True),
             "ingredient_id": st.column_config.NumberColumn("ingredient_id", disabled=True),
@@ -4312,9 +4321,9 @@ def page_producao_cancelar():
                 if not changed:
                     continue
                 try:
-                    qty  = float(b.get("qty") or 0.0)
-                    ucost= float(b.get("unit_cost") or 0.0)
-                    tcost= round(qty * ucost, 2)
+                    qty   = float(b.get("qty") or 0.0)
+                    ucost = float(b.get("unit_cost") or 0.0)
+                    tcost = round(qty * ucost, 2)  # total sempre em 2 casas
                     qexec("""
                         update resto.production_item
                            set qty=%s, unit_cost=%s, total_cost=%s
@@ -4326,12 +4335,12 @@ def page_producao_cancelar():
 
             # recalcula cabeçalho preservando fator de overhead/perdas
             hdr = qone("select coalesce(total_cost,0) as tot, coalesce(qty,0) as qty from resto.production where id=%s;", (sel_id,))
-            prev_total = float((hdr or {}).get("tot") or 0.0)
+            prev_total   = float((hdr or {}).get("tot") or 0.0)
             prev_ing_sum = float(orig_sum or 0.0)
             factor = (prev_total / prev_ing_sum) if prev_ing_sum > 0 else 1.0
 
             new_sum_row = qone("select coalesce(sum(total_cost),0) s from resto.production_item where production_id=%s;", (sel_id,))
-            new_sum = float((new_sum_row or {}).get("s") or 0.0)
+            new_sum   = float((new_sum_row or {}).get("s") or 0.0)
             new_total = new_sum * factor
             qty_final = float((hdr or {}).get("qty") or 0.0)
             new_unit  = (new_total / qty_final) if qty_final > 0 else 0.0
@@ -4363,7 +4372,8 @@ def page_producao_cancelar():
         novo_qty = st.number_input("Quantidade", min_value=0.001, step=0.001, value=1.000, format="%.3f",
                                    key=f"new_qty_{sel_id}")
     with c3:
-        novo_uc  = st.number_input("Custo unitário", min_value=0.0, step=0.01, value=0.00, format="%.4f",
+        # <<< 2 casas decimais no input >>>
+        novo_uc  = st.number_input("Custo unitário", min_value=0.0, step=0.01, value=0.00, format="%.2f",
                                    key=f"new_uc_{sel_id}")
 
     if st.button("Adicionar ao lote", key=f"btn_add_{sel_id}") and novo_ing:
@@ -4375,13 +4385,13 @@ def page_producao_cancelar():
             """, (sel_id, int(novo_ing[0]), float(novo_qty), float(novo_uc), tcost))
             # atualiza cabeçalho mantendo fator
             hdr = qone("select coalesce(total_cost,0) as tot, coalesce(qty,0) as qty from resto.production where id=%s;", (sel_id,))
-            prev_total = float((hdr or {}).get("tot") or 0.0)
+            prev_total  = float((hdr or {}).get("tot") or 0.0)
             new_sum_all = float(qone("select coalesce(sum(total_cost),0) s from resto.production_item where production_id=%s;", (sel_id,))["s"] or 0.0)
-            old_sum = max(new_sum_all - tcost, 0.0)
-            factor = (prev_total / old_sum) if old_sum > 0 else 1.0
-            new_total = new_sum_all * factor
-            qty_final = float((hdr or {}).get("qty") or 0.0)
-            new_unit  = (new_total / qty_final) if qty_final > 0 else 0.0
+            old_sum     = max(new_sum_all - tcost, 0.0)
+            factor      = (prev_total / old_sum) if old_sum > 0 else 1.0
+            new_total   = new_sum_all * factor
+            qty_final   = float((hdr or {}).get("qty") or 0.0)
+            new_unit    = (new_total / qty_final) if qty_final > 0 else 0.0
             try:
                 qexec("update resto.production set total_cost=%s, unit_cost=%s where id=%s;", (new_total, new_unit, sel_id))
             except Exception:
@@ -4405,6 +4415,7 @@ def page_producao_cancelar():
             st.error(msg)
 
     card_end()
+
 
 # =================================== LISTA DE COMPRAS ===================================
 def page_lista_compras():
