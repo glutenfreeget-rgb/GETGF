@@ -4729,6 +4729,7 @@ def page_lista_compras():
 def page_folha():
     import pandas as pd
     import re
+    import math
     from datetime import date, timedelta
 
     def _rerun():
@@ -4957,6 +4958,107 @@ def page_folha():
 
     def _week_label(dini: date, dfim: date) -> str:
         return f"{dini.strftime('%d/%m/%Y')} a {dfim.strftime('%d/%m/%Y')}"
+
+    def _num(v):
+        """Converte valores da grid em número (tratando None, '', NaN, etc.)."""
+        if v is None:
+            return 0
+        if isinstance(v, str):
+            v = v.replace("R$", "").replace(".", "").replace(",", ".").strip()
+            if not v:
+                return 0
+        try:
+            if isinstance(v, float) and math.isnan(v):
+                return 0
+        except Exception:
+            pass
+        try:
+            return float(v)
+        except Exception:
+            return 0
+
+    def _salvar_folha_semana(ref_date: date, week_start: date, week_end: date,
+                             week_label: str, df_editado: pd.DataFrame):
+        """
+        Salva/atualiza a folha da semana.
+        NÃO usa mais o id da folha; apenas (employee_id, ref_date).
+        """
+        n_ok = 0
+        n_err = 0
+        erros = []
+
+        for _, row in df_editado.iterrows():
+            try:
+                emp_id = int(row["employee_id"])
+            except Exception:
+                # se não tiver employee_id válido, ignora a linha
+                continue
+
+            bruto = _num(row.get("Bruto"))
+            inss = _num(row.get("INSS"))
+            outros = _num(row.get("Outros descontos"))
+            extras = _num(row.get("Extras"))
+            # recalcula líquido para garantir consistência
+            liquido = bruto - inss - outros + extras
+
+            pago = bool(row.get("Pago?"))
+            metodo = (row.get("Forma pgto") or "").strip() or None
+            obs = (row.get("Obs") or "").strip() or None
+            paid_at = date.today() if pago else None
+
+            params = {
+                "employee_id": emp_id,
+                "ref_date": ref_date,
+                "week_start": week_start,
+                "week_end": week_end,
+                "week_label": week_label,
+                "gross": bruto,
+                "inss": inss,
+                "other_discounts": outros,
+                "extras": extras,
+                "net": liquido,
+                "paid": pago,
+                "paid_at": paid_at,
+                "method": metodo,
+                "note": obs,
+            }
+
+            try:
+                qexec(
+                    """
+                    insert into resto.payroll_week(
+                        employee_id, ref_date, week_start, week_end, week_label,
+                        gross, inss, other_discounts, extras, net,
+                        paid, paid_at, method, note
+                    )
+                    values (
+                        %(employee_id)s, %(ref_date)s, %(week_start)s, %(week_end)s, %(week_label)s,
+                        %(gross)s, %(inss)s, %(other_discounts)s, %(extras)s, %(net)s,
+                        %(paid)s, %(paid_at)s, %(method)s, %(note)s
+                    )
+                    on conflict (employee_id, ref_date) do update set
+                        week_start      = excluded.week_start,
+                        week_end        = excluded.week_end,
+                        week_label      = excluded.week_label,
+                        gross           = excluded.gross,
+                        inss            = excluded.inss,
+                        other_discounts = excluded.other_discounts,
+                        extras          = excluded.extras,
+                        net             = excluded.net,
+                        paid            = excluded.paid,
+                        paid_at         = excluded.paid_at,
+                        method          = excluded.method,
+                        note            = excluded.note;
+                    """,
+                    params,
+                )
+                n_ok += 1
+            except Exception as e:
+                n_err += 1
+                nome_func = row.get("Funcionário") or f"ID func {emp_id}"
+                erros.append(f"{nome_func}: {e}")
+
+        return n_ok, n_err, erros
 
     PAY_METHODS = ['dinheiro', 'pix', 'cartão débito', 'cartão crédito', 'boleto', 'transferência', 'outro']
 
@@ -5190,71 +5292,18 @@ def page_folha():
 
         salvar_folha = st.button("💾 Salvar folha desta semana")
         if salvar_folha:
-            ins = upd = err = 0
-            for _, r in edited_f.iterrows():
-                emp_id = int(r["employee_id"])
-                pid = r["id"]
-                bruto = float(r.get("Bruto") or 0.0)
-                inss = float(r.get("INSS") or 0.0)
-                outros = float(r.get("Outros descontos") or 0.0)
-                extras = float(r.get("Extras") or 0.0)
-                liquido = float(r.get("Líquido") or (bruto - inss - outros + extras))
-                pago = bool(r.get("Pago?"))
-                metodo = r.get("Forma pgto") or None
-                obs = r.get("Obs") or None
-                paid_at = date.today() if pago else None
+            n_ok, n_err, erros = _salvar_folha_semana(di, di, df_, week_lbl, edited_f)
 
-                try:
-                    if pid:
-                        qexec("""
-                            update resto.payroll_week
-                               set ref_date=%s,
-                                   week_start=%s,
-                                   week_end=%s,
-                                   week_label=%s,
-                                   gross=%s,
-                                   inss=%s,
-                                   other_discounts=%s,
-                                   extras=%s,
-                                   net=%s,
-                                   paid=%s,
-                                   paid_at=%s,
-                                   method=%s,
-                                   note=%s
-                             where id=%s;
-                        """, (di, di, df_, week_lbl,
-                              bruto, inss, outros, extras, liquido,
-                              pago, paid_at, metodo, obs, int(pid)))
-                        upd += 1
-                    else:
-                        qexec("""
-                            insert into resto.payroll_week(
-                                employee_id, ref_date, week_start, week_end, week_label,
-                                gross, inss, other_discounts, extras, net,
-                                paid, paid_at, method, note
-                            )
-                            values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                            on conflict (employee_id, ref_date) do update set
-                                week_start      = excluded.week_start,
-                                week_end        = excluded.week_end,
-                                week_label      = excluded.week_label,
-                                gross           = excluded.gross,
-                                inss            = excluded.inss,
-                                other_discounts = excluded.other_discounts,
-                                extras          = excluded.extras,
-                                net             = excluded.net,
-                                paid            = excluded.paid,
-                                paid_at         = excluded.paid_at,
-                                method          = excluded.method,
-                                note            = excluded.note;
-                        """, (emp_id, di, di, df_, week_lbl,
-                              bruto, inss, outros, extras, liquido,
-                              pago, paid_at, metodo, obs))
-                        ins += 1
-                except Exception:
-                    err += 1
+            if n_ok:
+                st.success(f"Folha salva. Registros gravados/atualizados: {n_ok}. Erros: {n_err}.")
+            else:
+                st.error(f"Nenhum registro salvo. Erros: {n_err}.")
 
-            st.success(f"Folha salva. ✅ {upd} registro(s) atualizados • ➕ {ins} inserido(s) • ⚠️ {err} erro(s).")
+            if erros:
+                with st.expander("Ver detalhes dos erros (debug)"):
+                    for msg in erros:
+                        st.write("•", msg)
+
             _rerun()
 
         # resumo rápido da semana
@@ -5267,7 +5316,7 @@ def page_folha():
 
         card_end()
 
-       # ============ Aba: Relatório ============
+    # ============ Aba: Relatório ============
     with tabs[2]:
         card_start()
         st.subheader("Relatório de folha (por período)")
@@ -5298,7 +5347,7 @@ def page_folha():
             key="folha_rel_emp"
         )
 
-        # AGORA O FILTRO É POR p.ref_date (segunda-feira da semana)
+        # filtro por p.ref_date (segunda-feira da semana)
         wh = ["p.ref_date >= %s", "p.ref_date <= %s"]
         pr = [r_ini, r_fim]
 
@@ -5371,6 +5420,7 @@ def page_folha():
             st.caption("Nenhum lançamento de folha encontrado para o período/filtro.")
 
         card_end()
+
 
 
 
