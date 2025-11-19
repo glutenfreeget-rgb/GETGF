@@ -4725,6 +4725,535 @@ def page_lista_compras():
                 st.download_button("⬇️ Download PDF", data=pdf_bytes, file_name="lista_compras.pdf", mime="application/pdf")
         card_end()
 
+# ===================== RH / FOLHA DE PAGAMENTO =====================
+def page_rh_folha():
+    import pandas as pd
+    from datetime import date
+
+    def _rerun():
+        try:
+            st.rerun()
+        except Exception:
+            if hasattr(st, "experimental_rerun"):
+                st.experimental_rerun()
+
+    def _ensure_rh_schema():
+        qexec("""
+        do $$
+        begin
+          create table if not exists resto.employee (
+            id               bigserial primary key,
+            name             text not null,
+            role             text,
+            doc_cpf          text,
+            phone            text,
+            email            text,
+            admission_date   date,
+            termination_date date,
+            base_salary      numeric(14,2) default 0,
+            hour_rate        numeric(14,4),
+            pix_key          text,
+            bank             text,
+            agency           text,
+            account          text,
+            account_type     text,
+            active           boolean default true,
+            note             text
+          );
+
+          create table if not exists resto.payroll (
+            id              bigserial primary key,
+            competence      date not null,
+            employee_id     bigint not null references resto.employee(id) on delete cascade,
+            base_salary     numeric(14,2) not null default 0,
+            hours_worked    numeric(10,2) default 0,
+            overtime_hours  numeric(10,2) default 0,
+            overtime_value  numeric(14,2) default 0,
+            other_additions numeric(14,2) default 0,
+            discounts       numeric(14,2) default 0,
+            inss            numeric(14,2) default 0,
+            fgts            numeric(14,2) default 0,
+            net_pay         numeric(14,2) default 0,
+            status          text not null default 'ABERTA',  -- ABERTA | FECHADA | PAGA
+            pay_date        date,
+            method          text,
+            note            text
+          );
+
+          create index if not exists payroll_comp_emp_idx
+              on resto.payroll(competence, employee_id);
+        end $$;
+        """)
+    _ensure_rh_schema()
+
+    header("👥 RH / Folha de Pagamento", "Cadastre funcionários e feche a folha do mês.")
+    tabs = st.tabs(["👤 Funcionários", "🧾 Folha do mês", "📜 Histórico"])
+
+    # ---------- TAB 0: FUNCIONÁRIOS ----------
+    with tabs[0]:
+        card_start()
+        st.subheader("Cadastro de Funcionários")
+
+        with st.form("form_new_employee"):
+            c1, c2 = st.columns([2, 1])
+            with c1:
+                emp_name = st.text_input("Nome completo *")
+                emp_role = st.text_input("Função / Cargo")
+            with c2:
+                emp_cpf   = st.text_input("CPF")
+                emp_phone = st.text_input("Telefone / WhatsApp")
+
+            c3, c4 = st.columns(2)
+            with c3:
+                emp_email = st.text_input("E-mail")
+                emp_adm   = st.date_input("Data de admissão", value=date.today())
+            with c4:
+                emp_sal   = st.number_input("Salário base (R$)", 0.0, 1_000_000.0, 0.0, 0.01, format="%.2f")
+                emp_hour  = st.number_input("Valor hora (opcional)", 0.0, 1_000.0, 0.0, 0.01, format="%.2f")
+
+            c5, c6, c7 = st.columns(3)
+            with c5:
+                emp_pix  = st.text_input("Chave PIX (opcional)")
+            with c6:
+                emp_bank = st.text_input("Banco")
+                emp_ag   = st.text_input("Agência")
+            with c7:
+                emp_acc      = st.text_input("Conta")
+                emp_acc_type = st.text_input("Tipo de conta (corrente/poupança)")
+
+            emp_note   = st.text_area("Observações (opcional)", height=60)
+            emp_active = st.checkbox("Ativo", value=True)
+
+            ok_emp = st.form_submit_button("💾 Salvar funcionário")
+
+        if ok_emp:
+            if not emp_name.strip():
+                st.warning("Informe pelo menos o **nome** do funcionário.")
+            else:
+                try:
+                    qexec("""
+                        insert into resto.employee(
+                            name, role, doc_cpf, phone, email,
+                            admission_date, base_salary, hour_rate,
+                            pix_key, bank, agency, account, account_type,
+                            note, active
+                        )
+                        values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s);
+                    """, (
+                        emp_name.strip(), (emp_role or None), (emp_cpf or None),
+                        (emp_phone or None), (emp_email or None),
+                        emp_adm, float(emp_sal or 0), float(emp_hour or 0),
+                        (emp_pix or None), (emp_bank or None), (emp_ag or None),
+                        (emp_acc or None), (emp_acc_type or None),
+                        (emp_note or None), bool(emp_active)
+                    ))
+                    st.success("Funcionário salvo com sucesso.")
+                    _rerun()
+                except Exception as e:
+                    st.error(f"Não foi possível salvar o funcionário: {e}")
+
+        st.divider()
+        st.subheader("Lista / Edição rápida")
+
+        rows = qall("""
+            select id, name, role, doc_cpf, phone, email,
+                   admission_date, termination_date,
+                   base_salary, hour_rate, pix_key, active
+              from resto.employee
+             order by active desc, name;
+        """) or []
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df["Excluir?"] = False
+            cfg = {
+                "id":               st.column_config.NumberColumn("ID", disabled=True),
+                "name":             st.column_config.TextColumn("Nome"),
+                "role":             st.column_config.TextColumn("Função"),
+                "doc_cpf":          st.column_config.TextColumn("CPF"),
+                "phone":            st.column_config.TextColumn("Telefone"),
+                "email":            st.column_config.TextColumn("E-mail"),
+                "admission_date":   st.column_config.DateColumn("Admissão"),
+                "termination_date": st.column_config.DateColumn("Demissão"),
+                "base_salary":      st.column_config.NumberColumn("Salário base", format="%.2f", step=0.01),
+                "hour_rate":        st.column_config.NumberColumn("Valor hora", format="%.2f", step=0.01),
+                "pix_key":          st.column_config.TextColumn("Chave PIX"),
+                "active":           st.column_config.CheckboxColumn("Ativo"),
+                "Excluir?":         st.column_config.CheckboxColumn("Excluir?"),
+            }
+            edited = st.data_editor(
+                df[["id","name","role","doc_cpf","phone","email",
+                    "admission_date","termination_date",
+                    "base_salary","hour_rate","pix_key","active","Excluir?"]],
+                column_config=cfg,
+                hide_index=True,
+                num_rows="fixed",
+                key="emp_editor",
+                use_container_width=True
+            )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                apply_emp = st.button("💾 Salvar alterações (funcionários)")
+            with c2:
+                refresh_emp = st.button("🔄 Atualizar lista")
+
+            if refresh_emp:
+                _rerun()
+
+            if apply_emp:
+                orig = df.set_index("id")
+                new  = edited.set_index("id")
+                upd = delc = err = 0
+
+                # exclusões
+                to_del = new.index[new["Excluir?"] == True].tolist()
+                for eid in to_del:
+                    try:
+                        qexec("delete from resto.employee where id=%s;", (int(eid),))
+                        delc += 1
+                    except Exception:
+                        err += 1
+
+                # updates
+                keep_ids = [i for i in new.index if i not in to_del]
+                for eid in keep_ids:
+                    a = orig.loc[eid]; b = new.loc[eid]
+                    changed = any(str(a.get(f,"")) != str(b.get(f,"")) for f in [
+                        "name","role","doc_cpf","phone","email",
+                        "admission_date","termination_date",
+                        "base_salary","hour_rate","pix_key","active"
+                    ])
+                    if not changed:
+                        continue
+                    try:
+                        qexec("""
+                            update resto.employee
+                               set name=%s, role=%s, doc_cpf=%s, phone=%s, email=%s,
+                                   admission_date=%s, termination_date=%s,
+                                   base_salary=%s, hour_rate=%s, pix_key=%s, active=%s
+                             where id=%s;
+                        """, (
+                            b.get("name"), b.get("role") or None, b.get("doc_cpf") or None,
+                            b.get("phone") or None, b.get("email") or None,
+                            b.get("admission_date"), b.get("termination_date"),
+                            float(b.get("base_salary") or 0), float(b.get("hour_rate") or 0),
+                            b.get("pix_key") or None, bool(b.get("active")), int(eid)
+                        ))
+                        upd += 1
+                    except Exception:
+                        err += 1
+
+                st.success(f"Funcionários: ✅ {upd} atualizado(s) • 🗑️ {delc} excluído(s) • ⚠️ {err} erro(s).")
+                _rerun()
+        else:
+            st.caption("Nenhum funcionário cadastrado ainda.")
+        card_end()
+
+    # ---------- TAB 1: FOLHA DO MÊS ----------
+    with tabs[1]:
+        card_start()
+        st.subheader("Folha de Pagamento – Competência")
+
+        # competência sempre como primeiro dia do mês
+        comp = st.date_input(
+            "Competência (mês/ano)",
+            value=date.today().replace(day=1),
+            key="folha_competencia"
+        )
+        comp = comp.replace(day=1)
+        st.caption(f"Competência selecionada: **{comp.strftime('%m/%Y')}**")
+
+        # funcionários ativos
+        emps = qall("""
+            select id, name, role, base_salary
+              from resto.employee
+             where coalesce(active,true) is true
+             order by name;
+        """) or []
+
+        if not emps:
+            st.warning("Cadastre funcionários na aba **Funcionários** antes de montar a folha.")
+            card_end()
+            return
+
+        colA, colB = st.columns([2,1])
+        with colA:
+            gerar = st.button("🧾 Gerar/atualizar folha para todos os funcionários ativos")
+        with colB:
+            st.markdown("&nbsp;")
+            st.caption("Cria registros de folha para quem ainda não tiver neste mês.")
+
+        if gerar:
+            for e in emps:
+                r = qone(
+                    "select id from resto.payroll where employee_id=%s and competence=%s;",
+                    (int(e["id"]), comp)
+                )
+                if not r:
+                    qexec("""
+                        insert into resto.payroll(
+                            competence, employee_id,
+                            base_salary, net_pay, status
+                        )
+                        values (%s,%s,%s,%s,'ABERTA');
+                    """, (
+                        comp, int(e["id"]),
+                        float(e.get("base_salary") or 0),
+                        float(e.get("base_salary") or 0),
+                    ))
+            st.success("Folha gerada/atualizada para todos os funcionários ativos.")
+            _rerun()
+
+        # registros da competência
+        rows_folha = qall("""
+            select p.id, e.name, e.role,
+                   p.base_salary, p.hours_worked, p.overtime_hours, p.overtime_value,
+                   p.other_additions, p.discounts, p.inss, p.fgts,
+                   p.net_pay, p.status, p.pay_date, p.method
+              from resto.payroll p
+              join resto.employee e on e.id = p.employee_id
+             where p.competence = %s
+             order by e.name;
+        """, (comp,)) or []
+
+        if not rows_folha:
+            st.caption("Ainda não há registros de folha para esta competência.")
+            card_end()
+            return
+
+        df_f = pd.DataFrame(rows_folha)
+        df_f["proventos"] = (
+            df_f["base_salary"].astype(float)
+            + df_f["overtime_value"].astype(float)
+            + df_f["other_additions"].astype(float)
+        )
+        df_f["descontos_total"] = (
+            df_f["discounts"].astype(float)
+            + df_f["inss"].astype(float)
+        )
+        df_f["liq_calc"] = df_f["proventos"] - df_f["descontos_total"]
+
+        st.markdown("### Lançamentos da competência")
+
+        df_edit = df_f[[
+            "id","name","role",
+            "base_salary","hours_worked","overtime_hours","overtime_value",
+            "other_additions","discounts","inss","fgts",
+            "net_pay","status","pay_date","method"
+        ]].copy()
+        df_edit["Excluir?"] = False
+
+        METHOD_OPTS = ["", "dinheiro","pix","cartão débito","cartão crédito","boleto","transferência","outro"]
+        STATUS_OPTS = ["ABERTA","FECHADA","PAGA"]
+
+        colcfg_f = {
+            "id":              st.column_config.NumberColumn("ID", disabled=True),
+            "name":            st.column_config.TextColumn("Funcionário", disabled=True),
+            "role":            st.column_config.TextColumn("Função", disabled=True),
+            "base_salary":     st.column_config.NumberColumn("Salário base", format="%.2f", step=0.01),
+            "hours_worked":    st.column_config.NumberColumn("Horas trab.", format="%.2f", step=0.5),
+            "overtime_hours":  st.column_config.NumberColumn("Horas extra", format="%.2f", step=0.5),
+            "overtime_value":  st.column_config.NumberColumn("Valor horas extra", format="%.2f", step=0.01),
+            "other_additions": st.column_config.NumberColumn("Outros proventos", format="%.2f", step=0.01),
+            "discounts":       st.column_config.NumberColumn("Descontos", format="%.2f", step=0.01),
+            "inss":            st.column_config.NumberColumn("INSS", format="%.2f", step=0.01),
+            "fgts":            st.column_config.NumberColumn("FGTS", format="%.2f", step=0.01),
+            "net_pay":         st.column_config.NumberColumn("Líquido (gravado)", format="%.2f", step=0.01, disabled=True),
+            "status":          st.column_config.SelectboxColumn("Status", options=STATUS_OPTS),
+            "pay_date":        st.column_config.DateColumn("Data pagamento"),
+            "method":          st.column_config.SelectboxColumn("Método pagamento", options=METHOD_OPTS),
+            "Excluir?":        st.column_config.CheckboxColumn("Excluir?"),
+        }
+
+        edited_f = st.data_editor(
+            df_edit,
+            column_config=colcfg_f,
+            hide_index=True,
+            num_rows="fixed",
+            key=f"folha_editor_{comp}",
+            use_container_width=True
+        )
+
+        # Totais em tempo real
+        tot_bruto = float(df_f["proventos"].sum())
+        tot_desc  = float(df_f["descontos_total"].sum())
+        tot_liq   = float(df_f["liq_calc"].sum())
+
+        k1, k2, k3 = st.columns(3)
+        with k1: st.metric("Total proventos", money(tot_bruto))
+        with k2: st.metric("Total descontos", money(tot_desc))
+        with k3: st.metric("Total líquido (calc.)", money(tot_liq))
+
+        c1, c2 = st.columns(2)
+        with c1:
+            salvar_folha = st.button("💾 Salvar alterações da folha")
+        with c2:
+            refresh_folha = st.button("🔄 Recarregar folha")
+
+        if refresh_folha:
+            _rerun()
+
+        if salvar_folha:
+            orig = df_f.set_index("id")
+            new  = edited_f.set_index("id")
+            upd = delc = err = 0
+
+            def _num(v):
+                try:
+                    return float(v or 0)
+                except Exception:
+                    return 0.0
+
+            # exclusões (apenas do registro da folha)
+            to_del = new.index[new["Excluir?"] == True].tolist()
+            for pid in to_del:
+                try:
+                    qexec("delete from resto.payroll where id=%s;", (int(pid),))
+                    delc += 1
+                except Exception:
+                    err += 1
+
+            keep_ids = [i for i in new.index if i not in to_del]
+            for pid in keep_ids:
+                b = new.loc[pid]
+
+                base    = _num(b.get("base_salary"))
+                h_trab  = _num(b.get("hours_worked"))
+                h_ext   = _num(b.get("overtime_hours"))
+                val_ext = _num(b.get("overtime_value"))
+                outros  = _num(b.get("other_additions"))
+                desc    = _num(b.get("discounts"))
+                inss    = _num(b.get("inss"))
+                fgts    = _num(b.get("fgts"))
+
+                status = (b.get("status") or "ABERTA").upper()
+                method = b.get("method") or None
+                pay_dt = b.get("pay_date")
+
+                net = base + val_ext + outros - desc - inss
+
+                try:
+                    qexec("""
+                        update resto.payroll
+                           set base_salary=%s,
+                               hours_worked=%s,
+                               overtime_hours=%s,
+                               overtime_value=%s,
+                               other_additions=%s,
+                               discounts=%s,
+                               inss=%s,
+                               fgts=%s,
+                               net_pay=%s,
+                               status=%s,
+                               pay_date=%s,
+                               method=%s
+                         where id=%s;
+                    """, (
+                        base, h_trab, h_ext, val_ext,
+                        outros, desc, inss, fgts,
+                        net, status, pay_dt, method,
+                        int(pid)
+                    ))
+                    upd += 1
+                except Exception:
+                    err += 1
+
+            st.success(f"Folha: ✅ {upd} registro(s) atualizado(s) • 🗑️ {delc} removido(s) • ⚠️ {err} erro(s).")
+            _rerun()
+
+        card_end()
+
+    # ---------- TAB 2: HISTÓRICO ----------
+    with tabs[2]:
+        card_start()
+        st.subheader("Histórico de Folhas / Pagamentos")
+
+        col_dt1, col_dt2 = st.columns(2)
+        with col_dt1:
+            h_ini = st.date_input("Competência de", value=date.today().replace(day=1), key="hist_ini")
+        with col_dt2:
+            h_fim = st.date_input("Competência até", value=date.today().replace(day=1), key="hist_fim")
+
+        emps_all = qall("select id, name from resto.employee order by name;") or []
+        emp_opts = [(0, "— todos —")] + [(e["id"], e["name"]) for e in emps_all]
+
+        c1, c2 = st.columns(2)
+        with c1:
+            emp_sel = st.selectbox(
+                "Funcionário",
+                options=emp_opts,
+                format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+                key="hist_emp"
+            )
+        with c2:
+            st_status = st.multiselect(
+                "Status",
+                options=["ABERTA","FECHADA","PAGA"],
+                default=["FECHADA","PAGA"],
+                key="hist_status"
+            )
+
+        where = ["p.competence between %s and %s"]
+        params = [h_ini.replace(day=1), h_fim.replace(day=1)]
+        if emp_sel and isinstance(emp_sel, tuple) and emp_sel[0] != 0:
+            where.append("p.employee_id = %s")
+            params.append(int(emp_sel[0]))
+        if st_status:
+            where.append("p.status = any(%s)")
+            params.append(st_status)
+
+        sql_hist = f"""
+            select p.competence, e.name, e.role,
+                   p.base_salary, p.overtime_value, p.other_additions,
+                   p.discounts, p.inss, p.fgts,
+                   p.net_pay, p.status, p.pay_date
+              from resto.payroll p
+              join resto.employee e on e.id = p.employee_id
+             where {' and '.join(where)}
+             order by p.competence desc, e.name;
+        """
+        rows_h = qall(sql_hist, tuple(params)) or []
+        df_h = pd.DataFrame(rows_h)
+
+        if not df_h.empty:
+            df_h["competence"] = pd.to_datetime(df_h["competence"]).dt.strftime("%m/%Y")
+            df_h["Bruto"] = (
+                df_h["base_salary"].astype(float)
+                + df_h["overtime_value"].astype(float)
+                + df_h["other_additions"].astype(float)
+            )
+            df_h["Descontos"] = (
+                df_h["discounts"].astype(float)
+                + df_h["inss"].astype(float)
+            )
+            df_h["Líquido"] = df_h["net_pay"].astype(float)
+
+            df_view = df_h[[
+                "competence","name","role",
+                "Bruto","Descontos","Líquido",
+                "status","pay_date"
+            ]].rename(columns={
+                "competence": "Competência",
+                "name":       "Funcionário",
+                "role":       "Função",
+                "status":     "Status",
+                "pay_date":   "Data pagamento"
+            })
+
+            st.dataframe(df_view, use_container_width=True, hide_index=True)
+
+            tot_b = float(df_view["Bruto"].sum())
+            tot_d = float(df_view["Descontos"].sum())
+            tot_l = float(df_view["Líquido"].sum())
+
+            k1, k2, k3 = st.columns(3)
+            with k1: st.metric("Total bruto",   money(tot_b))
+            with k2: st.metric("Total descontos", money(tot_d))
+            with k3: st.metric("Total líquido", money(tot_l))
+        else:
+            st.caption("Nenhum registro encontrado para os filtros.")
+
+        card_end()
 
 
 # ===================== Router =====================
@@ -4741,7 +5270,7 @@ def main():
             # logo="https://seu-dominio.com/logo.png",  # URL externa
             logo_height=92
         )
-    page = st.sidebar.radio("Menu", ["PAINEL", "CADASTROS", "COMPRAS","LISTA DE COMPRAS", "VENDAS", "PREÇOS", "PRODUÇÃO", "MANIPULAR PRODUÇÃO","ESTOQUE", "FINANCEIRO","AGENDA DE CONTAS A PAGAR","RELATÓRIOS","IMPORTAÇÕES BANCÁRIAS"], index=0)
+    page = st.sidebar.radio("Menu", ["PAINEL", "CADASTROS", "COMPRAS","LISTA DE COMPRAS", "VENDAS", "PREÇOS", "PRODUÇÃO", "MANIPULAR PRODUÇÃO","ESTOQUE", "FINANCEIRO","AGENDA DE CONTAS A PAGAR","RH / Folha","RELATÓRIOS","IMPORTAÇÕES BANCÁRIAS"], index=0)
 
     if page == "PAINEL": page_dashboard()
     elif page == "CADASTROS": page_cadastros()
@@ -4754,6 +5283,7 @@ def main():
     elif page == "ESTOQUE": page_estoque()
     elif page == "FINANCEIRO": page_financeiro()
     elif page == "AGENDA DE CONTAS A PAGAR": page_agenda_contas()   # <— NOVO
+    elif page == "RH / Folha":page_rh_folha()
     elif page == "RELATÓRIOS": page_relatorios()
     elif page == "IMPORTAÇÕES BANCÁRIAS": page_importar_extrato()
 
