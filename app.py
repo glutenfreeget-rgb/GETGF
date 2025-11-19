@@ -5267,20 +5267,30 @@ def page_folha():
 
         card_end()
 
-    # ============ Aba: Relatório ============
+       # ============ Aba: Relatório ============
     with tabs[2]:
         card_start()
         st.subheader("Relatório de folha (por período)")
 
         colr1, colr2 = st.columns(2)
         with colr1:
-            r_ini = st.date_input("De (início da semana)", value=date.today().replace(day=1), key="folha_rel_ini")
+            # agora deixo claro que é pela data de referência (segunda da semana)
+            r_ini = st.date_input(
+                "De (data de referência)",
+                value=date.today().replace(day=1),
+                key="folha_rel_ini"
+            )
         with colr2:
-            r_fim = st.date_input("Até (fim da semana)", value=date.today(), key="folha_rel_fim")
+            r_fim = st.date_input(
+                "Até (data de referência)",
+                value=date.today(),
+                key="folha_rel_fim"
+            )
 
-        # funcionários p/ filtro
+        # funcionários para filtro
         funcs_all = qall("select id, name from resto.employee order by name;") or []
         emp_opts = [(0, "— todos —")] + [(f["id"], f["name"]) for f in funcs_all]
+
         emp_sel = st.selectbox(
             "Funcionário",
             options=emp_opts,
@@ -5288,30 +5298,65 @@ def page_folha():
             key="folha_rel_emp"
         )
 
-        wh = ["week_start >= %s", "week_end <= %s"]
+        # AGORA O FILTRO É POR p.ref_date (segunda-feira da semana)
+        wh = ["p.ref_date >= %s", "p.ref_date <= %s"]
         pr = [r_ini, r_fim]
-        if emp_sel and isinstance(emp_sel, tuple) and emp_sel[0] != 0:
-            wh.append("employee_id = %s")
+
+        if isinstance(emp_sel, tuple) and emp_sel[0] != 0:
+            wh.append("p.employee_id = %s")
             pr.append(int(emp_sel[0]))
 
         sql_rel = f"""
-            select p.week_start, p.week_end, p.week_label,
+            select p.ref_date,
+                   p.week_start,
+                   p.week_end,
+                   p.week_label,
                    e.name as funcionario,
-                   p.gross, p.inss, p.other_discounts, p.extras, p.net,
-                   p.paid, p.paid_at
+                   p.gross,
+                   p.inss,
+                   p.other_discounts,
+                   p.extras,
+                   p.net,
+                   p.paid,
+                   p.paid_at
               from resto.payroll_week p
               join resto.employee e on e.id = p.employee_id
              where {' and '.join(wh)}
-             order by p.week_start, e.name;
+             order by p.ref_date, e.name;
         """
+
         rows_rel = qall(sql_rel, tuple(pr)) or []
         df_rel = pd.DataFrame(rows_rel)
+
         if not df_rel.empty:
-            st.dataframe(df_rel, use_container_width=True, hide_index=True)
-            tot_bruto = float(df_rel["gross"].sum())
-            tot_liq = float(df_rel["net"].sum())
+            # renomear colunas para ficar mais bonito
+            df_rel = df_rel.rename(columns={
+                "ref_date":        "Data ref.",
+                "week_start":      "Início semana",
+                "week_end":        "Fim semana",
+                "week_label":      "Semana",
+                "funcionario":     "Funcionário",
+                "gross":           "Bruto",
+                "inss":            "INSS",
+                "other_discounts": "Outros descontos",
+                "extras":          "Extras",
+                "net":             "Líquido",
+                "paid":            "Pago?",
+                "paid_at":         "Pago em"
+            })
+
+            st.dataframe(
+                df_rel,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            tot_bruto = float(df_rel["Bruto"].sum())
+            tot_liq = float(df_rel["Líquido"].sum())
+
             st.markdown(
-                f"**Total bruto no período:** {money(tot_bruto)} &nbsp;&nbsp;•&nbsp;&nbsp;"
+                f"**Total bruto no período:** {money(tot_bruto)}"
+                f"&nbsp;&nbsp;•&nbsp;&nbsp;"
                 f"**Total líquido no período:** {money(tot_liq)}"
             )
 
@@ -5326,6 +5371,7 @@ def page_folha():
             st.caption("Nenhum lançamento de folha encontrado para o período/filtro.")
 
         card_end()
+
 
 
 
