@@ -4728,6 +4728,7 @@ def page_lista_compras():
 # ===================== RH / FOLHA DE PAGAMENTO =====================
 def page_folha():
     import pandas as pd
+    import re
     from datetime import date, timedelta
 
     def _rerun():
@@ -4741,59 +4742,210 @@ def page_folha():
         qexec("""
         do $$
         begin
-          -- Cadastro de funcionários
-          create table if not exists resto.employee (
-            id             bigserial primary key,
-            name           text not null,
-            cpf            text,
-            role           text,
-            admission_date date,
-            dismissal_date date,
-            weekly_salary  numeric(14,2) not null default 0,
-            active         boolean not null default true,
-            payment_method text,
-            note           text
-          );
-
-          -- índice/unique opcional por CPF (permite vários NULL)
+          -- ===================== FUNCIONÁRIOS =====================
+          -- garante tabela (caso não exista)
           if not exists (
             select 1
-              from pg_constraint
-             where conname = 'employee_cpf_uq'
-               and conrelid = 'resto.employee'::regclass
+              from information_schema.tables
+             where table_schema = 'resto'
+               and table_name   = 'employee'
           ) then
-            alter table resto.employee
-              add constraint employee_cpf_uq unique (cpf);
+            create table resto.employee (
+              id             bigserial primary key,
+              name           text,
+              cpf            text,
+              role           text,
+              admission_date date,
+              dismissal_date date,
+              weekly_salary  numeric(14,2) not null default 0,
+              active         boolean not null default true,
+              payment_method text,
+              note           text
+            );
           end if;
 
-          -- Folha semanal
-          create table if not exists resto.payroll_week (
-            id              bigserial primary key,
-            employee_id     bigint not null references resto.employee(id) on delete cascade,
-            ref_date        date not null,   -- usaremos sempre a segunda-feira da semana
-            week_start      date not null,
-            week_end        date not null,
-            week_label      text not null,
-            gross           numeric(14,2) not null,
-            inss            numeric(14,2) not null default 0,
-            other_discounts numeric(14,2) not null default 0,
-            extras          numeric(14,2) not null default 0,
-            net             numeric(14,2) not null,
-            paid            boolean not null default false,
-            paid_at         date,
-            method          text,
-            note            text
-          );
+          -- garante colunas (caso tabela já exista de versões antigas)
+          begin
+            alter table resto.employee add column if not exists name           text;
+          exception when duplicate_column then null; end;
 
+          begin
+            alter table resto.employee add column if not exists cpf            text;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.employee add column if not exists role           text;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.employee add column if not exists admission_date date;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.employee add column if not exists dismissal_date date;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.employee add column if not exists weekly_salary  numeric(14,2);
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.employee alter column weekly_salary set default 0;
+          exception when undefined_column then null; end;
+
+          begin
+            alter table resto.employee add column if not exists active         boolean;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.employee alter column active set default true;
+          exception when undefined_column then null; end;
+
+          begin
+            alter table resto.employee add column if not exists payment_method text;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.employee add column if not exists note           text;
+          exception when duplicate_column then null; end;
+
+          -- unique opcional por CPF (permite vários NULL)
+          begin
+            if not exists (
+              select 1
+                from pg_constraint
+               where conname = 'employee_cpf_uq'
+                 and conrelid = 'resto.employee'::regclass
+            ) then
+              alter table resto.employee
+                add constraint employee_cpf_uq unique (cpf);
+            end if;
+          exception
+            when undefined_column then
+              -- se ainda assim der problema com a coluna cpf, ignora a constraint
+              null;
+          end;
+
+          -- ===================== FOLHA SEMANAL =====================
           if not exists (
             select 1
-              from pg_constraint
-             where conname = 'payroll_week_emp_ref_uq'
-               and conrelid = 'resto.payroll_week'::regclass
+              from information_schema.tables
+             where table_schema = 'resto'
+               and table_name   = 'payroll_week'
           ) then
+            create table resto.payroll_week (
+              id              bigserial primary key,
+              employee_id     bigint not null,
+              ref_date        date not null,
+              week_start      date not null,
+              week_end        date not null,
+              week_label      text not null,
+              gross           numeric(14,2) not null,
+              inss            numeric(14,2) not null default 0,
+              other_discounts numeric(14,2) not null default 0,
+              extras          numeric(14,2) not null default 0,
+              net             numeric(14,2) not null,
+              paid            boolean not null default false,
+              paid_at         date,
+              method          text,
+              note            text
+            );
+          end if;
+
+          -- garante colunas (caso tabela antiga exista com menos campos)
+          begin
+            alter table resto.payroll_week add column if not exists employee_id     bigint;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists ref_date        date;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists week_start      date;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists week_end        date;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists week_label      text;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists gross           numeric(14,2);
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists inss            numeric(14,2);
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week alter column inss set default 0;
+          exception when undefined_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists other_discounts numeric(14,2);
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week alter column other_discounts set default 0;
+          exception when undefined_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists extras          numeric(14,2);
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week alter column extras set default 0;
+          exception when undefined_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists net             numeric(14,2);
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists paid            boolean;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week alter column paid set default false;
+          exception when undefined_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists paid_at         date;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists method          text;
+          exception when duplicate_column then null; end;
+
+          begin
+            alter table resto.payroll_week add column if not exists note            text;
+          exception when duplicate_column then null; end;
+
+          -- FK para employee (se ainda não existir)
+          begin
             alter table resto.payroll_week
-              add constraint payroll_week_emp_ref_uq unique (employee_id, ref_date);
-          end if;
+              add constraint payroll_week_employee_fk
+              foreign key (employee_id)
+              references resto.employee(id)
+              on delete cascade;
+          exception when duplicate_object then null; end;
+
+          -- unique por funcionário + data de referência (segunda da semana)
+          begin
+            if not exists (
+              select 1
+                from pg_constraint
+               where conname = 'payroll_week_emp_ref_uq'
+                 and conrelid = 'resto.payroll_week'::regclass
+            ) then
+              alter table resto.payroll_week
+                add constraint payroll_week_emp_ref_uq unique (employee_id, ref_date);
+            end if;
+          exception when undefined_column then null; end;
         end $$;
         """)
 
@@ -5129,9 +5281,12 @@ def page_folha():
         # funcionários p/ filtro
         funcs_all = qall("select id, name from resto.employee order by name;") or []
         emp_opts = [(0, "— todos —")] + [(f["id"], f["name"]) for f in funcs_all]
-        emp_sel = st.selectbox("Funcionário", options=emp_opts,
-                               format_func=lambda x: x[1] if isinstance(x, tuple) else x,
-                               key="folha_rel_emp")
+        emp_sel = st.selectbox(
+            "Funcionário",
+            options=emp_opts,
+            format_func=lambda x: x[1] if isinstance(x, tuple) else x,
+            key="folha_rel_emp"
+        )
 
         wh = ["week_start >= %s", "week_end <= %s"]
         pr = [r_ini, r_fim]
@@ -5171,6 +5326,7 @@ def page_folha():
             st.caption("Nenhum lançamento de folha encontrado para o período/filtro.")
 
         card_end()
+
 
 
 # ===================== Router =====================
