@@ -5200,7 +5200,7 @@ def main():
     elif page == "ESTOQUE": page_estoque()
     elif page == "FINANCEIRO": page_financeiro()
     elif page == "AGENDA DE CONTAS A PAGAR": page_agenda_contas()   # <— NOVO
-    elif page == "RH / Folha":page_rh_folha()
+    elif page == "RH / Folha":page_folha()
     elif page == "RELATÓRIOS": page_relatorios()
     elif page == "IMPORTAÇÕES BANCÁRIAS": page_importar_extrato()
 
