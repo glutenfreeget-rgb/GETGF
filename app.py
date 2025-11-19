@@ -5439,7 +5439,7 @@ def main():
             # logo="https://seu-dominio.com/logo.png",  # URL externa
             logo_height=92
         )
-    page = st.sidebar.radio("Menu", ["PAINEL", "CADASTROS", "COMPRAS","LISTA DE COMPRAS", "VENDAS", "PREÇOS", "PRODUÇÃO", "MANIPULAR PRODUÇÃO","ESTOQUE", "FINANCEIRO","AGENDA DE CONTAS A PAGAR","RH / Folha","RELATÓRIOS","IMPORTAÇÕES BANCÁRIAS"], index=0)
+    page = st.sidebar.radio("Menu", ["PAINEL", "CADASTROS", "COMPRAS","LISTA DE COMPRAS", "VENDAS", "PREÇOS", "PRODUÇÃO", "MANIPULAR PRODUÇÃO","ESTOQUE", "FINANCEIRO","AGENDA DE CONTAS A PAGAR","RH/FOLHA","RELATÓRIOS","IMPORTAÇÕES BANCÁRIAS"], index=0)
 
     if page == "PAINEL": page_dashboard()
     elif page == "CADASTROS": page_cadastros()
@@ -5452,7 +5452,7 @@ def main():
     elif page == "ESTOQUE": page_estoque()
     elif page == "FINANCEIRO": page_financeiro()
     elif page == "AGENDA DE CONTAS A PAGAR": page_agenda_contas()   # <— NOVO
-    elif page == "RH / Folha":page_folha()
+    elif page == "RH/FOLHA":page_folha()
     elif page == "RELATÓRIOS": page_relatorios()
     elif page == "IMPORTAÇÕES BANCÁRIAS": page_importar_extrato()
 
