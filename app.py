@@ -5721,6 +5721,8 @@ def page_importar_ifood():
             st.error(f"Erro ao apagar importação: {e}")
 
     card_end()
+
+
 # ===================== PÁGINA: CONCILIAÇÃO IFOOD x BANCO =====================
 def page_conciliacao_ifood():
     import pandas as pd
@@ -5881,6 +5883,8 @@ def page_conciliacao_ifood():
     )
     if not df_bank.empty:
         df_bank["entry_date"] = pd.to_datetime(df_bank["entry_date"], errors="coerce").dt.date
+        # força amount a ser numérico
+        df_bank["amount"] = pd.to_numeric(df_bank["amount"], errors="coerce").fillna(0.0)
 
     st.markdown("#### Opções do extrato bancário")
     only_ifood_bank = st.checkbox(
@@ -5895,6 +5899,7 @@ def page_conciliacao_ifood():
             ].copy()
         else:
             df_bank_filt = df_bank.copy()
+        # só entradas (créditos)
         df_bank_filt = df_bank_filt[
             df_bank_filt["kind"].astype(str).str.upper() == "IN"
         ]
@@ -5931,14 +5936,16 @@ def page_conciliacao_ifood():
     )
 
     df_resumo_dia["data"] = df_resumo_dia["_data"].combine_first(df_resumo_dia["entry_date"])
-    df_resumo_dia["valor_bruto"] = df_resumo_dia["valor_bruto"].fillna(0.0)
-    df_resumo_dia["taxas"] = df_resumo_dia["taxas"].fillna(0.0)
-    df_resumo_dia["valor_liquido"] = df_resumo_dia["valor_liquido"].fillna(0.0)
-    df_resumo_dia["credito_banco"] = df_resumo_dia["credito_banco"].fillna(0.0)
+
+    # preenche e força tudo pra número
+    df_resumo_dia["pedidos"] = df_resumo_dia["pedidos"].fillna(0).astype(int)
+
+    for col in ["valor_bruto", "taxas", "valor_liquido", "credito_banco"]:
+        df_resumo_dia[col] = pd.to_numeric(df_resumo_dia[col], errors="coerce").fillna(0.0)
+
     df_resumo_dia["diferença_banco_menos_ifood"] = (
         df_resumo_dia["credito_banco"] - df_resumo_dia["valor_liquido"]
     )
-    df_resumo_dia["pedidos"] = df_resumo_dia["pedidos"].fillna(0).astype(int)
 
     cols_out = [
         "data",
@@ -5953,7 +5960,7 @@ def page_conciliacao_ifood():
 
     st.dataframe(
         df_resumo_dia,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -5984,14 +5991,18 @@ def page_conciliacao_ifood():
                 return float(df_bank_filt.loc[mask, "amount"].sum() or 0.0)
 
             df_rep["credito_banco"] = df_rep[col_repasse].apply(_match_credito)
-            df_rep["diferença_banco_menos_ifood"] = (
-                df_rep["credito_banco"] - df_rep["valor_liquido"]
-            )
         else:
             df_rep["credito_banco"] = 0.0
-            df_rep["diferença_banco_menos_ifood"] = -df_rep["valor_liquido"]
 
-        st.dataframe(df_rep, use_container_width=True, hide_index=True)
+        # garante numéricos antes da diferença
+        for col in ["valor_bruto", "taxas", "valor_liquido", "credito_banco"]:
+            df_rep[col] = pd.to_numeric(df_rep[col], errors="coerce").fillna(0.0)
+
+        df_rep["diferença_banco_menos_ifood"] = (
+            df_rep["credito_banco"] - df_rep["valor_liquido"]
+        )
+
+        st.dataframe(df_rep, width="stretch", hide_index=True)
     else:
         st.caption(
             "Selecione uma coluna de repasse para ver o resumo por repasse "
@@ -6023,11 +6034,9 @@ def page_conciliacao_ifood():
             )
 
         df_taxa = pd.DataFrame(linhas_taxa)
-        st.dataframe(df_taxa, use_container_width=True, hide_index=True)
+        st.dataframe(df_taxa, width="stretch", hide_index=True)
 
     card_end()
-
-
 
 
 # ===================== Router =====================
