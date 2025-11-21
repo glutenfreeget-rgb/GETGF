@@ -222,6 +222,83 @@ def _record_cashbook_out_from_purchase(purchase_id: int, method: str, entry_date
         values (%s,'OUT',%s,%s,%s,%s);
     """, (entry_date, cat_id, desc, total, method))
 
+# ===================== IMPORTAÇÕES IFOOD – SCHEMA =====================
+def _ensure_ifood_schema():
+    """
+    Garante as tabelas de importação de arquivos do iFood.
+    - resto.ifood_import_batch: 1 linha por arquivo importado
+    - resto.ifood_import_row:   1 linha por registro do arquivo (dados em JSON)
+    """
+    qexec("""
+    do $$
+    begin
+      -- Tabela de lote de importação
+      if not exists (
+        select 1
+          from information_schema.tables
+         where table_schema = 'resto'
+           and table_name   = 'ifood_import_batch'
+      ) then
+        create table resto.ifood_import_batch (
+          id          bigserial primary key,
+          file_name   text        not null,
+          file_type   text        not null, -- ex.: 'conciliacao', 'pedidos'
+          imported_at timestamptz not null default now()
+        );
+      end if;
+
+      -- Tabela de linhas importadas
+      if not exists (
+        select 1
+          from information_schema.tables
+         where table_schema = 'resto'
+           and table_name   = 'ifood_import_row'
+      ) then
+        create table resto.ifood_import_row (
+          id         bigserial primary key,
+          batch_id   bigint      not null,
+          row_number int         not null,
+          order_id   text,
+          data       jsonb       not null
+        );
+      end if;
+
+      -- FK + cascade delete
+      begin
+        alter table resto.ifood_import_row
+          add constraint ifood_import_row_batch_fk
+          foreign key (batch_id)
+          references resto.ifood_import_batch(id)
+          on delete cascade;
+      exception
+        when duplicate_object then null;
+      end;
+
+      -- Unique por lote + número da linha (evita duplicar dentro do mesmo lote)
+      begin
+        if not exists (
+          select 1
+            from pg_constraint
+           where conname = 'ifood_import_row_batch_row_uq'
+             and conrelid = 'resto.ifood_import_row'::regclass
+        ) then
+          alter table resto.ifood_import_row
+            add constraint ifood_import_row_batch_row_uq
+            unique (batch_id, row_number);
+        end if;
+      exception
+        when undefined_table then null;
+      end;
+
+      -- Índice pra buscar por order_id rapidamente
+      begin
+        create index if not exists ifood_import_row_order_id_idx
+          on resto.ifood_import_row(order_id);
+      exception
+        when undefined_table then null;
+      end;
+    end $$;
+    """)
 
 
 # ===================== UI Helpers =====================
@@ -5421,6 +5498,229 @@ def page_folha():
 
         card_end()
 
+# ===================== PÁGINA: IMPORTAÇÕES IFOOD =====================
+def page_importar_ifood():
+    import pandas as pd
+    import json
+    from datetime import datetime
+
+    _ensure_ifood_schema()
+
+    # Estado da página
+    st.session_state.setdefault("ifood_df", None)
+    st.session_state.setdefault("ifood_tipo", None)
+    st.session_state.setdefault("ifood_nome", None)
+
+    header("🧾 Importações iFood", "Importe relatórios financeiros e de pedidos do iFood para conciliação bancária.")
+    card_start()
+
+    st.subheader("1) Importar novo arquivo do iFood")
+
+    uploaded = st.file_uploader(
+        "Selecione o arquivo do iFood (.xlsx / .xls / .csv)",
+        type=["xlsx", "xls", "csv"],
+        key="ifood_file"
+    )
+
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        btn_carregar = st.button("📥 Ler arquivo", use_container_width=True)
+    with col_b2:
+        btn_salvar = st.button(
+            "💾 Salvar importação na base",
+            use_container_width=True,
+            disabled=(st.session_state.get("ifood_df") is None)
+        )
+
+    def _detect_ifood_tipo(df: pd.DataFrame) -> str | None:
+        cols = set(df.columns)
+        # Relatório de conciliação (arquivo 2025-11.xlsx)
+        if "competencia" in cols and "pedido_associado_ifood" in cols:
+            return "conciliacao"
+        # Relatório de pedidos (arquivo relatorio-pedidos_....xlsx)
+        if "ID COMPLETO DO PEDIDO" in cols or "ID CURTO DO PEDIDO" in cols:
+            return "pedidos"
+        return None
+
+    def _load_ifood_file(file_obj):
+        name = (file_obj.name or "").lower()
+
+        if name.endswith(".csv"):
+            # Caso algum relatório venha em CSV; se precisar, ajuste separador/decimal
+            df_tmp = pd.read_csv(file_obj)
+            tipo = _detect_ifood_tipo(df_tmp) or "desconhecido"
+            return df_tmp, tipo
+
+        # Padrão: XLSX com abas
+        xls = pd.ExcelFile(file_obj)
+        df_detectado = None
+        tipo_detectado = None
+
+        # tenta em todas as abas até encontrar um layout conhecido
+        for sheet in xls.sheet_names:
+            df_tmp = xls.parse(sheet)
+            t = _detect_ifood_tipo(df_tmp)
+            if t:
+                df_detectado = df_tmp
+                tipo_detectado = t
+                break
+
+        if df_detectado is None:
+            # fallback: primeira aba
+            df_detectado = xls.parse(xls.sheet_names[0])
+            tipo_detectado = _detect_ifood_tipo(df_detectado) or "desconhecido"
+
+        # remove linhas totalmente vazias
+        df_detectado = df_detectado.dropna(how="all")
+
+        return df_detectado, tipo_detectado
+
+    # ========== CARREGAR ARQUIVO ==========
+    if btn_carregar:
+        if not uploaded:
+            st.warning("Selecione um arquivo primeiro.")
+        else:
+            try:
+                df, tipo = _load_ifood_file(uploaded)
+                st.session_state["ifood_df"] = df
+                st.session_state["ifood_tipo"] = tipo
+                st.session_state["ifood_nome"] = uploaded.name
+                st.success(f"Arquivo lido com sucesso. Tipo detectado: **{tipo}**. Linhas: **{len(df)}**.")
+            except Exception as e:
+                st.error(f"Erro ao ler o arquivo do iFood: {e}")
+
+    df_preview = st.session_state.get("ifood_df")
+    tipo_arquivo = st.session_state.get("ifood_tipo")
+    nome_arquivo = st.session_state.get("ifood_nome")
+
+    if df_preview is not None:
+        st.markdown(
+            f"**Arquivo:** `{nome_arquivo or ''}`  •  "
+            f"**Tipo:** `{tipo_arquivo or 'desconhecido'}`  •  "
+            f"**Linhas:** {len(df_preview)}"
+        )
+        st.caption("Pré-visualização (primeiras 50 linhas):")
+        st.dataframe(df_preview.head(50), use_container_width=True, hide_index=True)
+
+    # ========== SALVAR NO BANCO ==========
+    if btn_salvar:
+        df = st.session_state.get("ifood_df")
+        tipo_arquivo = st.session_state.get("ifood_tipo") or "desconhecido"
+        nome_arquivo = st.session_state.get("ifood_nome") or (uploaded.name if uploaded else "arquivo_ifood")
+
+        if df is None:
+            st.warning("Nenhum arquivo carregado. Leia o arquivo primeiro.")
+        else:
+            try:
+                # cria o "lote" da importação
+                row = qone(
+                    "insert into resto.ifood_import_batch(file_name, file_type) "
+                    "values (%s, %s) returning id;",
+                    (nome_arquivo, tipo_arquivo)
+                )
+                batch_id = row["id"]
+
+                def _row_to_dict(row):
+                    d = {}
+                    for col, val in row.items():
+                        if pd.isna(val):
+                            continue
+                        # converte datas / timestamps pra string ISO
+                        if isinstance(val, (pd.Timestamp, datetime)):
+                            d[col] = val.isoformat()
+                        else:
+                            d[col] = val
+                    return d
+
+                def _extract_order_id(row, tipo: str):
+                    if tipo == "conciliacao":
+                        for k in ["pedido_associado_ifood", "pedido_associado_ifood_curto"]:
+                            if k in row.index and not pd.isna(row[k]):
+                                return str(row[k])
+                    else:  # 'pedidos' ou outros
+                        for k in ["ID COMPLETO DO PEDIDO", "ID CURTO DO PEDIDO"]:
+                            if k in row.index and not pd.isna(row[k]):
+                                return str(row[k])
+                    return None
+
+                inserted = 0
+                for i, r in df.iterrows():
+                    row_dict = _row_to_dict(r)
+                    if not row_dict:
+                        continue
+                    order_id = _extract_order_id(r, tipo_arquivo)
+                    json_str = json.dumps(row_dict, ensure_ascii=False, default=str)
+
+                    try:
+                        qexec(
+                            "insert into resto.ifood_import_row(batch_id, row_number, order_id, data) "
+                            "values (%s, %s, %s, %s::jsonb);",
+                            (batch_id, int(i) + 1, order_id, json_str)
+                        )
+                        inserted += 1
+                    except Exception:
+                        # se alguma linha der erro, apenas pula e segue
+                        continue
+
+                st.success(
+                    f"Importação salva com sucesso: **{inserted} linha(s)** "
+                    f"para o arquivo `{nome_arquivo}` (tipo `{tipo_arquivo}`)."
+                )
+            except Exception as e:
+                st.error(f"Erro ao salvar a importação no banco: {e}")
+
+    card_end()
+
+    # ========== GERENCIAR IMPORTAÇÕES / APAGAR ==========
+    card_start()
+    st.subheader("2) Importações já realizadas")
+
+    batches = qall("""
+        select
+          b.id,
+          b.file_name,
+          b.file_type,
+          b.imported_at,
+          count(r.id) as linhas
+        from resto.ifood_import_batch b
+        left join resto.ifood_import_row r on r.batch_id = b.id
+        group by b.id, b.file_name, b.file_type, b.imported_at
+        order by b.imported_at desc
+        limit 200;
+    """) or []
+
+    if not batches:
+        st.caption("Nenhuma importação de iFood salva ainda.")
+        card_end()
+        return
+
+    options = {}
+    for b in batches:
+        dt = b["imported_at"]
+        dt_str = dt.strftime("%d/%m/%Y %H:%M") if isinstance(dt, datetime) else str(dt)
+        label = f"[{b['file_type']}] {b['file_name']} ({b['linhas']} linha(s) em {dt_str})"
+        options[label] = b["id"]
+
+    sel_label = st.selectbox(
+        "Escolha uma importação para apagar (irá remover todas as linhas desse arquivo):",
+        options=list(options.keys())
+    )
+    sel_id = options.get(sel_label)
+
+    col_del1, col_del2 = st.columns([1, 1])
+    with col_del1:
+        apagar = st.button("🗑️ Apagar importação selecionada", type="primary", use_container_width=True)
+    with col_del2:
+        st.caption("⚠️ Essa ação remove todas as linhas desse arquivo (não afeta outras importações).")
+
+    if apagar and sel_id:
+        try:
+            qexec("delete from resto.ifood_import_batch where id = %s;", (int(sel_id),))
+            st.success("Importação apagada com sucesso (lote e todas as linhas associadas).")
+        except Exception as e:
+            st.error(f"Erro ao apagar importação: {e}")
+
+    card_end()
 
 
 
@@ -5439,7 +5739,7 @@ def main():
             # logo="https://seu-dominio.com/logo.png",  # URL externa
             logo_height=92
         )
-    page = st.sidebar.radio("Menu", ["PAINEL", "CADASTROS", "COMPRAS","LISTA DE COMPRAS", "VENDAS", "PREÇOS", "PRODUÇÃO", "MANIPULAR PRODUÇÃO","ESTOQUE", "FINANCEIRO","AGENDA DE CONTAS A PAGAR","RH/FOLHA","RELATÓRIOS","IMPORTAÇÕES BANCÁRIAS"], index=0)
+    page = st.sidebar.radio("Menu", ["PAINEL", "CADASTROS", "COMPRAS","LISTA DE COMPRAS", "VENDAS", "PREÇOS", "PRODUÇÃO", "MANIPULAR PRODUÇÃO","ESTOQUE", "FINANCEIRO","AGENDA DE CONTAS A PAGAR","RH/FOLHA","RELATÓRIOS","IMPORTAÇÕES BANCÁRIAS","IMPORTAÇÕES IFOOD"], index=0)
 
     if page == "PAINEL": page_dashboard()
     elif page == "CADASTROS": page_cadastros()
@@ -5455,6 +5755,7 @@ def main():
     elif page == "RH/FOLHA":page_folha()
     elif page == "RELATÓRIOS": page_relatorios()
     elif page == "IMPORTAÇÕES BANCÁRIAS": page_importar_extrato()
+    elif page == "IMPORTAÇÕES IFOOD":page_importar_ifood()
 
 if __name__ == "__main__":
     main()
