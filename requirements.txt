@@ -3,4 +3,4 @@ pandas==2.3.3
 psycopg[binary]==3.2.3
 python-dateutil>=2.9.0
 reportlab>=4.0,<5
-
+openpyxl
