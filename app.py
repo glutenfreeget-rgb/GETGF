@@ -5721,6 +5721,311 @@ def page_importar_ifood():
             st.error(f"Erro ao apagar importação: {e}")
 
     card_end()
+# ===================== PÁGINA: CONCILIAÇÃO IFOOD x BANCO =====================
+def page_conciliacao_ifood():
+    import pandas as pd
+    from datetime import date, timedelta
+
+    header(
+        "📊 Conciliação iFood x Banco",
+        "Resumo por dia, por repasse e por taxa usando os dados já importados."
+    )
+    card_start()
+
+    # --- parâmetros de data (últimos 30 dias como padrão) ---
+    hoje = date.today()
+    padrao_ini = hoje - timedelta(days=30)
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        dt_ini = st.date_input("Data inicial", value=padrao_ini)
+    with col_f2:
+        dt_fim = st.date_input("Data final", value=hoje)
+
+    if dt_ini > dt_fim:
+        st.error("Período inválido: a data inicial é maior que a data final.")
+        card_end()
+        return
+
+    # --- carrega dados do iFood (apenas arquivos tipo 'conciliacao') ---
+    rows_ifood = qall(
+        """
+        select r.id,
+               r.batch_id,
+               r.row_number,
+               r.order_id,
+               r.data,
+               b.file_name,
+               b.file_type,
+               b.imported_at
+          from resto.ifood_import_row r
+          join resto.ifood_import_batch b on b.id = r.batch_id
+         where b.file_type = 'conciliacao'
+        """
+    )
+
+    if not rows_ifood:
+        st.info("Nenhuma importação de iFood do tipo 'conciliacao' encontrada ainda.")
+        card_end()
+        return
+
+    df_raw = pd.DataFrame(rows_ifood)
+
+    if "data" not in df_raw.columns:
+        st.error("A tabela resto.ifood_import_row não possui coluna 'data' (jsonb).")
+        card_end()
+        return
+
+    # normaliza o JSON do ifood em colunas
+    df_json = pd.json_normalize(df_raw["data"])
+    df_ifood = pd.concat([df_raw.drop(columns=["data"]), df_json], axis=1)
+
+    # ====== MAPEAMENTO FLEXÍVEL DE COLUNAS ======
+    cols = list(df_ifood.columns)
+
+    def _guess_col(substrs):
+        for c in cols:
+            cl = c.lower()
+            if any(s in cl for s in substrs):
+                return c
+        return None
+
+    col_data_guess = _guess_col(["competencia", "data", "dt"])
+    col_liq_guess = _guess_col(["líquido", "liquido", "repasse", "vl_liquido", "vl_liq"])
+    col_bruto_guess = _guess_col(["bruto", "total pedido", "vl_total_bruto"])
+    tax_candidates = [c for c in cols if any(s in c.lower() for s in ["taxa", "comissão", "comissao"])]
+
+    st.markdown("#### Mapeamento de colunas do relatório iFood")
+    st.caption(
+        "Escolha quais colunas do arquivo do iFood representam **data**, "
+        "**valor líquido**, **valor bruto** e **taxas**. "
+        "Isso deixa o relatório flexível pra diferentes layouts do iFood."
+    )
+
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        col_data = st.selectbox(
+            "Coluna de data / competência",
+            options=cols,
+            index=cols.index(col_data_guess) if col_data_guess in cols else 0,
+        )
+        col_bruto = st.selectbox(
+            "Coluna de valor bruto",
+            options=cols,
+            index=cols.index(col_bruto_guess) if col_bruto_guess in cols else 0,
+        )
+    with col_c2:
+        col_liq = st.selectbox(
+            "Coluna de valor líquido / repasse",
+            options=cols,
+            index=cols.index(col_liq_guess) if col_liq_guess in cols else 0,
+        )
+        col_repasse = st.selectbox(
+            "Coluna identificador do repasse (se existir)",
+            options=["(não usar)"] + cols,
+            index=0,
+        )
+
+    tax_cols = st.multiselect(
+        "Colunas de taxas (uma ou mais)",
+        options=cols,
+        default=[c for c in tax_candidates[:3]],
+    )
+
+    def _to_number_series(s):
+        if s is None:
+            return pd.Series([0.0] * len(df_ifood))
+        return pd.to_numeric(
+            s.astype(str)
+             .str.replace("R$", "", regex=False)
+             .str.replace(".", "", regex=False)
+             .str.replace(",", ".", regex=False)
+             .str.strip(),
+            errors="coerce",
+        ).fillna(0.0)
+
+    # coluna de data convertida para date
+    df_ifood["_data"] = pd.to_datetime(df_ifood[col_data], errors="coerce").dt.date
+    df_ifood = df_ifood.dropna(subset=["_data"])
+    df_ifood = df_ifood[(df_ifood["_data"] >= dt_ini) & (df_ifood["_data"] <= dt_fim)]
+
+    if df_ifood.empty:
+        st.warning("Não há registros do iFood no período selecionado.")
+        card_end()
+        return
+
+    df_ifood["_bruto"] = _to_number_series(df_ifood[col_bruto])
+    df_ifood["_liq"] = _to_number_series(df_ifood[col_liq])
+
+    tax_internal_cols = []
+    for c in tax_cols:
+        internal = f"_tax_{c}"
+        df_ifood[internal] = _to_number_series(df_ifood[c])
+        tax_internal_cols.append(internal)
+
+    if tax_internal_cols:
+        df_ifood["_tax_total"] = df_ifood[tax_internal_cols].sum(axis=1)
+    else:
+        df_ifood["_tax_total"] = 0.0
+
+    # ====== DADOS DO BANCO (CASHBOOK) ======
+    rows_bank = qall(
+        """
+        select entry_date, description, amount, kind
+          from resto.cashbook
+         where entry_date between %s and %s
+        """,
+        (dt_ini, dt_fim),
+    )
+    df_bank = pd.DataFrame(rows_bank) if rows_bank else pd.DataFrame(
+        columns=["entry_date", "description", "amount", "kind"]
+    )
+    if not df_bank.empty:
+        df_bank["entry_date"] = pd.to_datetime(df_bank["entry_date"], errors="coerce").dt.date
+
+    st.markdown("#### Opções do extrato bancário")
+    only_ifood_bank = st.checkbox(
+        "Considerar apenas lançamentos com 'IFOOD' na descrição",
+        value=True
+    )
+
+    if not df_bank.empty:
+        if only_ifood_bank:
+            df_bank_filt = df_bank[
+                df_bank["description"].astype(str).str.upper().str.contains("IFOOD", na=False)
+            ].copy()
+        else:
+            df_bank_filt = df_bank.copy()
+        df_bank_filt = df_bank_filt[
+            df_bank_filt["kind"].astype(str).str.upper() == "IN"
+        ]
+    else:
+        df_bank_filt = df_bank.copy()
+
+    # ==================== 1) RESUMO POR DIA ====================
+    st.markdown("### 1) Resumo por dia")
+
+    df_ifood_dia = (
+        df_ifood.groupby("_data", as_index=False)
+        .agg(
+            pedidos=("order_id", "count"),
+            valor_bruto=("_bruto", "sum"),
+            taxas=("_tax_total", "sum"),
+            valor_liquido=("_liq", "sum"),
+        )
+    )
+
+    if not df_bank_filt.empty:
+        df_bank_dia = (
+            df_bank_filt.groupby("entry_date", as_index=False)
+            .agg(credito_banco=("amount", "sum"))
+        )
+    else:
+        df_bank_dia = pd.DataFrame(columns=["entry_date", "credito_banco"])
+
+    df_resumo_dia = pd.merge(
+        df_ifood_dia,
+        df_bank_dia,
+        left_on="_data",
+        right_on="entry_date",
+        how="outer",
+    )
+
+    df_resumo_dia["data"] = df_resumo_dia["_data"].combine_first(df_resumo_dia["entry_date"])
+    df_resumo_dia["valor_bruto"] = df_resumo_dia["valor_bruto"].fillna(0.0)
+    df_resumo_dia["taxas"] = df_resumo_dia["taxas"].fillna(0.0)
+    df_resumo_dia["valor_liquido"] = df_resumo_dia["valor_liquido"].fillna(0.0)
+    df_resumo_dia["credito_banco"] = df_resumo_dia["credito_banco"].fillna(0.0)
+    df_resumo_dia["diferença_banco_menos_ifood"] = (
+        df_resumo_dia["credito_banco"] - df_resumo_dia["valor_liquido"]
+    )
+    df_resumo_dia["pedidos"] = df_resumo_dia["pedidos"].fillna(0).astype(int)
+
+    cols_out = [
+        "data",
+        "pedidos",
+        "valor_bruto",
+        "taxas",
+        "valor_liquido",
+        "credito_banco",
+        "diferença_banco_menos_ifood",
+    ]
+    df_resumo_dia = df_resumo_dia[cols_out].sort_values("data")
+
+    st.dataframe(
+        df_resumo_dia,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # ==================== 2) RESUMO POR REPASSE ====================
+    st.markdown("### 2) Resumo por repasse (apenas iFood)")
+
+    if col_repasse != "(não usar)":
+        df_rep = (
+            df_ifood.groupby(col_repasse, as_index=False)
+            .agg(
+                pedidos=("order_id", "count"),
+                valor_bruto=("_bruto", "sum"),
+                taxas=("_tax_total", "sum"),
+                valor_liquido=("_liq", "sum"),
+            )
+        )
+
+        if not df_bank_filt.empty:
+            def _match_credito(rep_val):
+                if rep_val is None:
+                    return 0.0
+                txt = str(rep_val).strip()
+                if not txt:
+                    return 0.0
+                mask = df_bank_filt["description"].astype(str).str.contains(
+                    txt, case=False, na=False
+                )
+                return float(df_bank_filt.loc[mask, "amount"].sum() or 0.0)
+
+            df_rep["credito_banco"] = df_rep[col_repasse].apply(_match_credito)
+            df_rep["diferença_banco_menos_ifood"] = (
+                df_rep["credito_banco"] - df_rep["valor_liquido"]
+            )
+        else:
+            df_rep["credito_banco"] = 0.0
+            df_rep["diferença_banco_menos_ifood"] = -df_rep["valor_liquido"]
+
+        st.dataframe(df_rep, use_container_width=True, hide_index=True)
+    else:
+        st.caption(
+            "Selecione uma coluna de repasse para ver o resumo por repasse "
+            "(ex.: número ou ID do repasse)."
+        )
+
+    # ==================== 3) RESUMO POR TIPO DE TAXA ====================
+    st.markdown("### 3) Resumo por taxa (apenas iFood)")
+
+    if not tax_cols:
+        st.caption("Nenhuma coluna de taxa selecionada.")
+    else:
+        linhas_taxa = []
+        total_liq = float(df_ifood["_liq"].sum() or 0.0)
+        total_bruto = float(df_ifood["_bruto"].sum() or 0.0)
+
+        for c in tax_cols:
+            internal = f"_tax_{c}"
+            total_taxa = float(df_ifood[internal].sum() or 0.0)
+            perc_bruto = (total_taxa / total_bruto * 100.0) if total_bruto else 0.0
+            perc_liq = (total_taxa / total_liq * 100.0) if total_liq else 0.0
+            linhas_taxa.append(
+                {
+                    "taxa_coluna": c,
+                    "total_taxa": total_taxa,
+                    "% sobre bruto": perc_bruto,
+                    "% sobre líquido": perc_liq,
+                }
+            )
+
+        df_taxa = pd.DataFrame(linhas_taxa)
+        st.dataframe(df_taxa, use_container_width=True, hide_index=True)
+
+    card_end()
 
 
 
@@ -5739,7 +6044,7 @@ def main():
             # logo="https://seu-dominio.com/logo.png",  # URL externa
             logo_height=92
         )
-    page = st.sidebar.radio("Menu", ["PAINEL", "CADASTROS", "COMPRAS","LISTA DE COMPRAS", "VENDAS", "PREÇOS", "PRODUÇÃO", "MANIPULAR PRODUÇÃO","ESTOQUE", "FINANCEIRO","AGENDA DE CONTAS A PAGAR","RH/FOLHA","RELATÓRIOS","IMPORTAÇÕES BANCÁRIAS","IMPORTAÇÕES IFOOD"], index=0)
+    page = st.sidebar.radio("Menu", ["PAINEL", "CADASTROS", "COMPRAS","LISTA DE COMPRAS", "VENDAS", "PREÇOS", "PRODUÇÃO", "MANIPULAR PRODUÇÃO","ESTOQUE", "FINANCEIRO","CONCILIAÇÃO IFOOD","AGENDA DE CONTAS A PAGAR","RH/FOLHA","RELATÓRIOS","IMPORTAÇÕES BANCÁRIAS","IMPORTAÇÕES IFOOD"], index=0)
 
     if page == "PAINEL": page_dashboard()
     elif page == "CADASTROS": page_cadastros()
@@ -5751,6 +6056,7 @@ def main():
     elif page == "MANIPULAR PRODUÇÃO": page_producao_cancelar()
     elif page == "ESTOQUE": page_estoque()
     elif page == "FINANCEIRO": page_financeiro()
+    elif page == "CONCILIAÇÃO IFOOD": page_conciliacao_ifood()
     elif page == "AGENDA DE CONTAS A PAGAR": page_agenda_contas()   # <— NOVO
     elif page == "RH/FOLHA":page_folha()
     elif page == "RELATÓRIOS": page_relatorios()
