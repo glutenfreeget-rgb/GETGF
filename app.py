@@ -5948,6 +5948,7 @@ def page_conciliacao_ifood():
     import pandas as pd
     from datetime import date, timedelta
     import streamlit as st
+    from pandas.api.types import is_numeric_dtype
 
     header(
         "📊 Conciliação iFood x Banco",
@@ -6040,16 +6041,18 @@ def page_conciliacao_ifood():
         card_end()
         return
 
-    # Função para converter "R$ 1.234,56" em número
+    # --------- Converter valores corretamente ---------
     def _to_number(s: pd.Series) -> pd.Series:
-        return pd.to_numeric(
-            s.astype(str)
-             .str.replace("R$", "", regex=False)
-             .str.replace(".", "", regex=False)
-             .str.replace(",", ".", regex=False)
-             .str.strip(),
-            errors="coerce",
-        ).fillna(0.0)
+        # se já é numérico (caso do seu arquivo), só garante float
+        if is_numeric_dtype(s):
+            return s.astype(float).fillna(0.0)
+
+        # se veio como texto tipo "R$ 1.234,56"
+        txt = s.astype(str).str.strip().str.replace("R$", "", regex=False)
+        if txt.str.contains(",", na=False).any():
+            # padrão brasileiro
+            txt = txt.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+        return pd.to_numeric(txt, errors="coerce").fillna(0.0)
 
     df_ef["_valor_repasse"] = _to_number(df_ef["valor"])
 
@@ -6146,9 +6149,11 @@ def page_conciliacao_ifood():
     total_diff = total_banco - total_ifood
 
     st.markdown("### Totais no período (iFood x Banco)")
+    st.caption(f"Período considerado: {dt_ini} até {dt_fim}")
     df_totais = pd.DataFrame(
         [{
-            "descrição": "Somatório no período",
+            "periodo_inicio": dt_ini,
+            "periodo_fim": dt_fim,
             "total_repasse_ifood": total_ifood,
             "total_credito_banco": total_banco,
             "diferença_banco_menos_ifood": total_diff,
@@ -6178,6 +6183,7 @@ def page_conciliacao_ifood():
         st.dataframe(df_bank_ifood, use_container_width=True, hide_index=True)
 
     card_end()
+
 
 
 
