@@ -2573,8 +2573,138 @@ def page_estoque():
 
                 st.success(f"Produtos: ✅ {upd} atualizado(s) • 🗑️ {delc} excluído(s) • ⚠️ {err} erro(s).")
                 st.rerun()
-        else:
+                else:
             st.caption("Nenhum produto cadastrado.")
+
+        # ---------- Importação em massa de produtos (planilha OLACLICK) ----------
+        st.markdown("### Importar produtos a partir da planilha (OLACLICK)")
+        st.caption(
+            "Use a planilha exportada do OLACLICK com as colunas "
+            "'Categoria do produto', 'Nome do produto', 'Preço' e 'Preço com desconto'. "
+            "Os produtos serão gravados na tabela resto.product."
+        )
+
+        import unicodedata
+
+        def _norm_colname(c: str) -> str:
+            if not c:
+                return ""
+            c = unicodedata.normalize("NFKD", str(c))
+            c = "".join(ch for ch in c if not unicodedata.combining(ch))
+            return c.lower().strip()
+
+        file_prod = st.file_uploader(
+            "Arquivo de produtos (.xlsx ou .csv)",
+            type=["xlsx", "xls", "csv"],
+            key="import_prod_olaclick",
+        )
+
+        if file_prod is not None:
+            # lê o arquivo em DataFrame
+            try:
+                if str(file_prod.name).lower().endswith((".xlsx", ".xls")):
+                    df_imp = pd.read_excel(file_prod)
+                else:
+                    # tenta CSV com ; ou ,
+                    df_imp = pd.read_csv(file_prod, sep=";|,", engine="python")
+            except Exception as e:
+                st.error(f"Erro ao ler o arquivo: {e}")
+                df_imp = None
+
+            if df_imp is not None:
+                # mapa: nome normalizado -> nome real da coluna
+                norm_map = {_norm_colname(c): c for c in df_imp.columns}
+
+                col_nome  = norm_map.get("nome do produto") or norm_map.get("nome")
+                col_cat   = norm_map.get("categoria do produto") or norm_map.get("categoria")
+                # preferência para "preço com desconto" se existir
+                col_preco_desc = (norm_map.get("preco com desconto")
+                                  or norm_map.get("preço com desconto"))
+                col_preco      = (col_preco_desc
+                                  or norm_map.get("preco")
+                                  or norm_map.get("preço"))
+                col_desc  = norm_map.get("descricao") or norm_map.get("descrição")
+
+                if not col_nome or not col_preco:
+                    st.error(
+                        "A planilha precisa ter, no mínimo, as colunas "
+                        "'Nome do produto' e 'Preço' (ou 'Preço com desconto')."
+                    )
+                else:
+                    st.write("Pré-visualização dos dados que serão importados:")
+                    preview_cols = [c for c in [col_cat, col_nome, col_preco, col_desc] if c]
+                    st.dataframe(df_imp[preview_cols].head(20), use_container_width=True)
+
+                    if st.button("🚀 Importar produtos da planilha", key="btn_import_prod_olaclick"):
+                        ok = err = 0
+                        for _, row in df_imp.iterrows():
+                            name = str(row[col_nome] or "").strip()
+                            if not name:
+                                continue
+
+                            # categoria opcional (usa exatamente o texto da planilha)
+                            if col_cat and not pd.isna(row[col_cat]):
+                                category = str(row[col_cat]).strip() or None
+                            else:
+                                category = None
+
+                            # escolhe preço: se tiver coluna de desconto > 0, usa ela; senão usa preço normal
+                            preco_val = None
+                            if col_preco_desc and not pd.isna(row.get(col_preco_desc)):
+                                try:
+                                    preco_val = float(row[col_preco_desc])
+                                except Exception:
+                                    preco_val = None
+                            if preco_val is None and not pd.isna(row[col_preco]):
+                                try:
+                                    preco_val = float(row[col_preco])
+                                except Exception:
+                                    preco_val = 0.0
+                            if preco_val is None:
+                                preco_val = 0.0
+
+                            try:
+                                # grava / atualiza produto na tabela resto.product
+                                qexec("""
+                                    insert into resto.product(
+                                        name, unit, category,
+                                        min_stock, last_cost, active,
+                                        sale_price, is_sale_item, is_ingredient, default_markup
+                                    )
+                                    values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                    on conflict (name) do update set
+                                        unit=excluded.unit,
+                                        category=excluded.category,
+                                        min_stock=excluded.min_stock,
+                                        last_cost=excluded.last_cost,
+                                        active=excluded.active,
+                                        sale_price=excluded.sale_price,
+                                        is_sale_item=excluded.is_sale_item,
+                                        is_ingredient=excluded.is_ingredient,
+                                        default_markup=excluded.default_markup;
+                                """, (
+                                    name,
+                                    "un",            # unidade padrão
+                                    category,        # categoria vem do texto da planilha
+                                    0.0,             # estoque mínimo padrão
+                                    0.0,             # custo ainda será alimentado pelas compras/fichas
+                                    True,            # ativo
+                                    float(preco_val or 0.0),  # preço de venda
+                                    True,            # é item de venda
+                                    False,           # não é ingrediente
+                                    0.0,             # markup padrão
+                                ))
+                                ok += 1
+                            except Exception:
+                                err += 1
+
+                        st.success(
+                            f"Importação concluída: {ok} produto(s) importado(s)/atualizado(s) "
+                            f"• {err} erro(s)."
+                        )
+                        st.info("Depois clique em '🔄 Atualizar' acima para recarregar a lista de produtos.")
+
+        card_end()
 
 
 
