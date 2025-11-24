@@ -2573,7 +2573,7 @@ def page_estoque():
 
                 st.success(f"Produtos: ✅ {upd} atualizado(s) • 🗑️ {delc} excluído(s) • ⚠️ {err} erro(s).")
                 st.rerun()
-                else:
+        else:
             st.caption("Nenhum produto cadastrado.")
 
         
