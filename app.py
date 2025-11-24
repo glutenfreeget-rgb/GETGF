@@ -6112,7 +6112,7 @@ def page_conciliacao_ifood():
     df_resumo = pd.merge(
         df_ifood_dia,
         df_bank_dia,
-        left_on="_data_repasse",
+        left_on("_data_repasse",
         right_on="entry_date",
         how="outer",
     )
@@ -6140,6 +6140,22 @@ def page_conciliacao_ifood():
     st.markdown("### Resumo por data de repasse")
     st.dataframe(df_resumo, use_container_width=True, hide_index=True)
 
+    # ---------- TOTAIS DO PERÍODO (BATIMENTO GERAL) ----------
+    total_ifood = float(df_ef["_valor_repasse"].sum() or 0.0)
+    total_banco = float(df_bank_ifood["amount"].sum() or 0.0)
+    total_diff = total_banco - total_ifood
+
+    st.markdown("### Totais no período (iFood x Banco)")
+    df_totais = pd.DataFrame(
+        [{
+            "descrição": "Somatório no período",
+            "total_repasse_ifood": total_ifood,
+            "total_credito_banco": total_banco,
+            "diferença_banco_menos_ifood": total_diff,
+        }]
+    )
+    st.dataframe(df_totais, use_container_width=True, hide_index=True)
+
     # ---------- Detalhes (opcionais) ----------
     with st.expander("Ver detalhes das Entradas Financeiras do iFood"):
         cols_det = [
@@ -6162,6 +6178,7 @@ def page_conciliacao_ifood():
         st.dataframe(df_bank_ifood, use_container_width=True, hide_index=True)
 
     card_end()
+
 
 
 
