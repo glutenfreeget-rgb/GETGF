@@ -5942,6 +5942,226 @@ def page_conciliacao_ifood():
         st.dataframe(df_bank_ifood, use_container_width=True, hide_index=True)
 
     card_end()
+    
+# ===================== PÁGINA: CONCILIAÇÃO IFOOD x BANCO (SIMPLIFICADA) =====================
+def page_conciliacao_ifood():
+    import pandas as pd
+    from datetime import date, timedelta
+
+    header(
+        "📊 Conciliação iFood x Banco",
+        "Compara os repasses do iFood (Entrada Financeira) com os créditos do banco."
+    )
+    card_start()
+
+    # ---------- Filtro de datas ----------
+    hoje = date.today()
+    padrao_ini = hoje - timedelta(days=30)
+
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        dt_ini = st.date_input("Data inicial do repasse (iFood)", value=padrao_ini)
+    with col_f2:
+        dt_fim = st.date_input("Data final do repasse (iFood)", value=hoje)
+
+    if dt_ini > dt_fim:
+        st.error("Período inválido: a data inicial é maior que a data final.")
+        card_end()
+        return
+
+    # ---------- Busca dados do iFood (conciliacao) ----------
+    rows_ifood = qall(
+        """
+        select r.id,
+               r.data,
+               b.file_name,
+               b.imported_at
+          from resto.ifood_import_row r
+          join resto.ifood_import_batch b on b.id = r.batch_id
+         where b.file_type = 'conciliacao'
+        """
+    )
+
+    if not rows_ifood:
+        st.info("Nenhum arquivo de conciliação do iFood foi importado ainda.")
+        card_end()
+        return
+
+    df_raw = pd.DataFrame(rows_ifood)
+
+    if "data" not in df_raw.columns:
+        st.error("A tabela resto.ifood_import_row não possui a coluna JSON 'data'.")
+        card_end()
+        return
+
+    # JSON -> colunas
+    df_ifood = pd.json_normalize(df_raw["data"])
+
+    # Conferência mínima de colunas
+    required_cols = [
+        "tipo_lancamento",
+        "descricao_lancamento",
+        "valor",
+        "data_repasse_esperada",
+        "pedido_associado_ifood_curto",
+    ]
+    missing = [c for c in required_cols if c not in df_ifood.columns]
+    if missing:
+        st.error(
+            "O arquivo de conciliação não tem as colunas esperadas: "
+            + ", ".join(missing)
+        )
+        card_end()
+        return
+
+    # ---------- Filtra apenas ENTRADA FINANCEIRA ----------
+    df_ef = df_ifood[
+        df_ifood["tipo_lancamento"].astype(str).str.upper() == "ENTRADA FINANCEIRA"
+    ].copy()
+
+    if df_ef.empty:
+        st.warning("Não encontrei lançamentos com tipo_lancamento = 'Entrada Financeira'.")
+        card_end()
+        return
+
+    # Converte data de repasse
+    df_ef["_data_repasse"] = pd.to_datetime(
+        df_ef["data_repasse_esperada"], errors="coerce"
+    ).dt.date
+    df_ef = df_ef.dropna(subset=["_data_repasse"])
+    df_ef = df_ef[
+        (df_ef["_data_repasse"] >= dt_ini) &
+        (df_ef["_data_repasse"] <= dt_fim)
+    ]
+
+    if df_ef.empty:
+        st.warning("Não há repasses do iFood no período selecionado.")
+        card_end()
+        return
+
+    # Função para converter "R$ 1.234,56" em número
+    def _to_number(s: pd.Series) -> pd.Series:
+        return pd.to_numeric(
+            s.astype(str)
+             .str.replace("R$", "", regex=False)
+             .str.replace(".", "", regex=False)
+             .str.replace(",", ".", regex=False)
+             .str.strip(),
+            errors="coerce",
+        ).fillna(0.0)
+
+    df_ef["_valor_repasse"] = _to_number(df_ef["valor"])
+
+    # Agrupa iFood por data de repasse
+    df_ifood_dia = (
+        df_ef.groupby("_data_repasse", as_index=False)
+        .agg(
+            pedidos=("pedido_associado_ifood_curto", "nunique"),
+            repasse_ifood=("_valor_repasse", "sum"),
+        )
+    )
+
+    # ---------- Busca dados do banco (cashbook) ----------
+    rows_bank = qall(
+        """
+        select entry_date, description, amount, kind
+          from resto.cashbook
+         where entry_date between %s and %s
+        """,
+        (dt_ini, dt_fim),
+    )
+
+    if rows_bank:
+        df_bank = pd.DataFrame(rows_bank)
+        df_bank["entry_date"] = pd.to_datetime(
+            df_bank["entry_date"], errors="coerce"
+        ).dt.date
+        df_bank["amount"] = pd.to_numeric(
+            df_bank["amount"], errors="coerce"
+        ).fillna(0.0)
+    else:
+        df_bank = pd.DataFrame(columns=["entry_date", "description", "amount", "kind"])
+
+    st.markdown("#### Como buscar os lançamentos do iFood no extrato bancário")
+    filtro_desc = st.text_input(
+        "Filtrar créditos do banco cuja descrição contenha:",
+        value="Vendas iFood",
+        help="Use o texto que aparece na descrição do extrato para os repasses do iFood."
+    )
+
+    if not df_bank.empty:
+        df_bank_ifood = df_bank[
+            (df_bank["kind"].astype(str).str.upper() == "IN")
+            & (df_bank["description"].astype(str).str.contains(
+                filtro_desc, case=False, na=False
+            ))
+        ].copy()
+    else:
+        df_bank_ifood = df_bank.copy()
+
+    if df_bank_ifood.empty:
+        st.info("Nenhum lançamento do banco encontrado com esse filtro de descrição.")
+        df_bank_dia = pd.DataFrame(columns=["entry_date", "credito_banco"])
+    else:
+        df_bank_dia = (
+            df_bank_ifood.groupby("entry_date", as_index=False)
+            .agg(credito_banco=("amount", "sum"))
+        )
+
+    # ---------- Junta iFood x Banco por data ----------
+    df_resumo = pd.merge(
+        df_ifood_dia,
+        df_bank_dia,
+        left_on="_data_repasse",
+        right_on="entry_date",
+        how="outer",
+    )
+
+    df_resumo["data_repasse"] = df_resumo["_data_repasse"].combine_first(
+        df_resumo["entry_date"]
+    )
+
+    df_resumo["pedidos"] = df_resumo["pedidos"].fillna(0).astype(int)
+    df_resumo["repasse_ifood"] = pd.to_numeric(
+        df_resumo["repasse_ifood"], errors="coerce"
+    ).fillna(0.0)
+    df_resumo["credito_banco"] = pd.to_numeric(
+        df_resumo["credito_banco"], errors="coerce"
+    ).fillna(0.0)
+
+    df_resumo["diferenca"] = (
+        df_resumo["credito_banco"] - df_resumo["repasse_ifood"]
+    )
+
+    df_resumo = df_resumo[
+        ["data_repasse", "pedidos", "repasse_ifood", "credito_banco", "diferenca"]
+    ].sort_values("data_repasse")
+
+    st.markdown("### Resumo por data de repasse")
+    st.dataframe(df_resumo, use_container_width=True, hide_index=True)
+
+    # ---------- Detalhes (opcionais) ----------
+    with st.expander("Ver detalhes das Entradas Financeiras do iFood"):
+        cols_det = [
+            "_data_repasse",
+            "pedido_associado_ifood_curto",
+            "valor",
+            "tipo_lancamento",
+            "descricao_lancamento",
+        ]
+        cols_det = [c for c in cols_det if c in df_ef.columns]
+        st.dataframe(
+            df_ef[cols_det].sort_values(
+                ["_data_repasse", "pedido_associado_ifood_curto"]
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with st.expander("Ver lançamentos do banco considerados no cálculo"):
+        st.dataframe(df_bank_ifood, use_container_width=True, hide_index=True)
+
+    card_end()
 
 
 
@@ -5959,7 +6179,7 @@ def main():
             # logo="https://seu-dominio.com/logo.png",  # URL externa
             logo_height=92
         )
-    page = st.sidebar.radio("Menu", ["PAINEL", "CADASTROS", "COMPRAS","LISTA DE COMPRAS", "VENDAS", "PREÇOS", "PRODUÇÃO", "MANIPULAR PRODUÇÃO","ESTOQUE", "FINANCEIRO","CONCILIAÇÃO IFOOD","AGENDA DE CONTAS A PAGAR","RH/FOLHA","RELATÓRIOS","IMPORTAÇÕES BANCÁRIAS","IMPORTAÇÕES IFOOD"], index=0)
+    page = st.sidebar.radio("Menu", ["PAINEL", "CADASTROS", "COMPRAS","LISTA DE COMPRAS", "VENDAS", "PREÇOS", "PRODUÇÃO", "MANIPULAR PRODUÇÃO","ESTOQUE", "FINANCEIRO","CONCILIAÇÃO IFOOD","AGENDA DE CONTAS A PAGAR","RH/FOLHA","RELATÓRIOS","IMPORTAÇÕES BANCÁRIAS","IMPORTAÇÕES IFOOD","CONCILIAÇÃO IFOOD"], index=0)
 
     if page == "PAINEL": page_dashboard()
     elif page == "CADASTROS": page_cadastros()
@@ -5977,6 +6197,7 @@ def main():
     elif page == "RELATÓRIOS": page_relatorios()
     elif page == "IMPORTAÇÕES BANCÁRIAS": page_importar_extrato()
     elif page == "IMPORTAÇÕES IFOOD":page_importar_ifood()
+    elif page == "CONCILIAÇÃO IFOOD":page_conciliacao_ifood()
 
 if __name__ == "__main__":
     main()
