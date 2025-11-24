@@ -5947,6 +5947,7 @@ def page_conciliacao_ifood():
 def page_conciliacao_ifood():
     import pandas as pd
     from datetime import date, timedelta
+    import streamlit as st
 
     header(
         "📊 Conciliação iFood x Banco",
@@ -6100,7 +6101,6 @@ def page_conciliacao_ifood():
         df_bank_ifood = df_bank.copy()
 
     if df_bank_ifood.empty:
-        st.info("Nenhum lançamento do banco encontrado com esse filtro de descrição.")
         df_bank_dia = pd.DataFrame(columns=["entry_date", "credito_banco"])
     else:
         df_bank_dia = (
@@ -6112,7 +6112,7 @@ def page_conciliacao_ifood():
     df_resumo = pd.merge(
         df_ifood_dia,
         df_bank_dia,
-        left_on("_data_repasse",
+        left_on="_data_repasse",
         right_on="entry_date",
         how="outer",
     )
@@ -6178,6 +6178,7 @@ def page_conciliacao_ifood():
         st.dataframe(df_bank_ifood, use_container_width=True, hide_index=True)
 
     card_end()
+
 
 
 
