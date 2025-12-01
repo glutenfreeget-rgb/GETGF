@@ -3062,6 +3062,39 @@ def page_financeiro():
                 use_container_width=True
             )
 
+            # === NOVO BLOCO: conferência de saldo com o banco ===
+            # Usa exatamente os lançamentos filtrados acima (período, categoria, método, etc.)
+            df_calc = df_g.copy()
+            df_calc["amount"] = pd.to_numeric(df_calc["amount"], errors="coerce").fillna(0.0)
+            df_calc["kind"] = df_calc["kind"].astype(str).str.upper()
+
+            df_calc["signed"] = df_calc.apply(
+                lambda r: r["amount"] if r["kind"] == "IN" else -r["amount"],
+                axis=1
+            )
+            saldo_sistema = float(df_calc["signed"].sum() or 0.0)
+
+            st.markdown("#### Conferência de saldo com o banco (usando os filtros acima)")
+            st.caption("Filtre por conta/categoria e período, depois compare o saldo abaixo com o saldo que o banco mostra.")
+
+            c_s1, c_s2, c_s3 = st.columns(3)
+            with c_s1:
+                st.metric("Saldo calculado pelo sistema", money(saldo_sistema))
+            with c_s2:
+                saldo_banco = st.number_input(
+                    "Saldo informado pelo banco",
+                    value=0.0,
+                    step=0.01,
+                    format="%.2f",
+                    key="gest_saldo_banco"
+                )
+            with c_s3:
+                diff = saldo_banco - saldo_sistema
+                st.metric("Diferença (Banco - Sistema)", money(diff))
+
+            st.divider()
+            # === FIM DO BLOCO NOVO ===
+
             colb1, colb2 = st.columns(2)
             with colb1:
                 aplicar = st.button("💾 Aplicar alterações", key="gest_apply")
@@ -3116,6 +3149,7 @@ def page_financeiro():
             st.caption("Sem lançamentos para os filtros.")
 
         card_end()
+
 
     # ---------- Aba: 📊 Painel ----------
     with tabs[4]:
