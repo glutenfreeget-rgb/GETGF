@@ -3067,18 +3067,30 @@ def page_financeiro():
             df_calc = df_g.copy()
             df_calc["amount"] = pd.to_numeric(df_calc["amount"], errors="coerce").fillna(0.0)
             df_calc["kind"] = df_calc["kind"].astype(str).str.upper()
-
+            
+            # garante sinal correto independentemente de como veio do banco
             df_calc["signed"] = df_calc.apply(
-                lambda r: r["amount"] if r["kind"] == "IN" else -r["amount"],
+                lambda r: abs(r["amount"]) if r["kind"] == "IN" else -abs(r["amount"]),
                 axis=1
             )
-            saldo_sistema = float(df_calc["signed"].sum() or 0.0)
-
+            
+            # variação dos lançamentos filtrados
+            variacao_periodo = float(df_calc["signed"].sum() or 0.0)
+            
             st.markdown("#### Conferência de saldo com o banco (usando os filtros acima)")
-            st.caption("Filtre por conta/categoria e período, depois compare o saldo abaixo com o saldo que o banco mostra.")
-
-            c_s1, c_s2, c_s3 = st.columns(3)
+            st.caption("Informe o saldo inicial do período para bater com o saldo final do banco.")
+            
+            c_s0, c_s1, c_s2, c_s3 = st.columns(4)
+            with c_s0:
+                saldo_inicial = st.number_input(
+                    "Saldo inicial (antes do período filtrado)",
+                    value=0.0,
+                    step=0.01,
+                    format="%.2f",
+                    key="gest_saldo_inicial"
+                )
             with c_s1:
+                saldo_sistema = saldo_inicial + variacao_periodo
                 st.metric("Saldo calculado pelo sistema", money(saldo_sistema))
             with c_s2:
                 saldo_banco = st.number_input(
