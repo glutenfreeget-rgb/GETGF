@@ -554,15 +554,18 @@ def page_cadastros():
     # ---------- Fornecedores ----------
     with tabs[2]:
         card_start()
+        import re  # garante que o re existe aqui
         st.subheader("Fornecedores")
+
+        # ---- Formulário para incluir NOVO fornecedor ----
         with st.form("form_sup"):
-            name = st.text_input("Nome *")
-            cnpj = st.text_input("CNPJ")
-            ie   = st.text_input("Inscrição Estadual")
-            email= st.text_input("Email")
-            phone= st.text_input("Telefone")
+            name  = st.text_input("Nome *")
+            cnpj  = st.text_input("CNPJ")
+            ie    = st.text_input("Inscrição Estadual")
+            email = st.text_input("Email")
+            phone = st.text_input("Telefone")
             ok = st.form_submit_button("Salvar fornecedor")
-            
+
             if ok and name:
                 # normalizações leves para evitar sujeira
                 _name  = (name or "").strip()
@@ -570,18 +573,116 @@ def page_cadastros():
                 _ie    = (ie or "").strip() or None
                 _email = (email or "").strip() or None
                 _phone = re.sub(r"\D", "", phone or "") or None  # só dígitos
-            
+
                 try:
                     qexec("""
                         insert into resto.supplier(name, cnpj, ie, email, phone)
                         values (%s,%s,%s,%s,%s);
                     """, (_name, _cnpj, _ie, _email, _phone))
                     st.success("Fornecedor salvo!")
-                except Exception as e:
+                except Exception:
                     st.error("Não foi possível salvar o fornecedor. Verifique os dados (nome obrigatório).")
 
-        rows = qall("select id, name, cnpj, ie, email, phone from resto.supplier order by name;")
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        # ---- Grid editável de fornecedores ----
+        rows = qall("""
+            select id, name, cnpj, ie, email, phone,
+                   coalesce(active, true) as active
+              from resto.supplier
+             order by name;
+        """) or []
+        df_sup = pd.DataFrame(rows)
+
+        if not df_sup.empty:
+            df_sup["Excluir?"] = False
+
+            colcfg = {
+                "id":     st.column_config.NumberColumn("ID", disabled=True),
+                "name":   st.column_config.TextColumn("Nome"),
+                "cnpj":   st.column_config.TextColumn("CNPJ"),
+                "ie":     st.column_config.TextColumn("Inscrição Est."),
+                "email":  st.column_config.TextColumn("Email"),
+                "phone":  st.column_config.TextColumn("Telefone"),
+                "active": st.column_config.CheckboxColumn("Ativo"),
+                "Excluir?": st.column_config.CheckboxColumn("Excluir?"),
+            }
+
+            edited = st.data_editor(
+                df_sup[["id","name","cnpj","ie","email","phone","active","Excluir?"]],
+                column_config=colcfg,
+                hide_index=True,
+                num_rows="fixed",
+                key="sup_edit_grid",
+                use_container_width=True,
+            )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                apply = st.button("💾 Salvar alterações (fornecedores)")
+            with c2:
+                refresh = st.button("🔄 Atualizar lista")
+
+            if refresh:
+                st.rerun()
+
+            if apply:
+                orig = df_sup.set_index("id")
+                new  = edited.set_index("id")
+                upd = delc = err = 0
+
+                # --- exclusões marcadas ---
+                to_del = new.index[new["Excluir?"] == True].tolist()
+                for fid in to_del:
+                    try:
+                        qexec("delete from resto.supplier where id=%s;", (int(fid),))
+                        delc += 1
+                    except Exception:
+                        # normalmente vai falhar se tiver FK (compras, produtos, etc.)
+                        err += 1
+
+                # --- updates (linhas não marcadas para excluir) ---
+                keep = [i for i in new.index if i not in to_del]
+                for fid in keep:
+                    a = orig.loc[fid]
+                    b = new.loc[fid]
+
+                    # normaliza iguais ao formulário
+                    name_new  = (b.get("name") or "").strip()
+                    cnpj_new  = re.sub(r"\D", "", str(b.get("cnpj") or "")) or None
+                    ie_new    = (b.get("ie") or "").strip() or None
+                    email_new = (b.get("email") or "").strip() or None
+                    phone_new = re.sub(r"\D", "", str(b.get("phone") or "")) or None
+                    active_new= bool(b.get("active"))
+
+                    if not name_new:
+                        err += 1
+                        continue
+
+                    changed = (
+                        name_new  != (a.get("name") or "") or
+                        (cnpj_new or "")  != (a.get("cnpj") or "") or
+                        (ie_new or "")    != (a.get("ie") or "") or
+                        (email_new or "") != (a.get("email") or "") or
+                        (phone_new or "") != (a.get("phone") or "") or
+                        active_new        != bool(a.get("active"))
+                    )
+                    if not changed:
+                        continue
+
+                    try:
+                        qexec("""
+                            update resto.supplier
+                               set name=%s, cnpj=%s, ie=%s, email=%s, phone=%s, active=%s
+                             where id=%s;
+                        """, (name_new, cnpj_new, ie_new, email_new, phone_new, active_new, int(fid)))
+                        upd += 1
+                    except Exception:
+                        err += 1
+
+                st.success(f"Fornecedores: ✅ {upd} atualizado(s) • 🗑️ {delc} excluído(s) • ⚠️ {err} erro(s).")
+                st.rerun()
+        else:
+            st.caption("Nenhum fornecedor cadastrado.")
+
         card_end()
 
     # ---------- Produtos ----------
