@@ -2992,11 +2992,12 @@ def page_financeiro():
                        and move_date <  %s
                 ),
                 caixa_desp as (
-                    select coalesce(sum(case when kind='OUT' then amount else 0 end),0) d
+                    select coalesce(sum(case when kind='OUT' then -amount else 0 end),0) d
                       from resto.cashbook
                      where entry_date >= %s
                        and entry_date <  %s
                 ),
+
                 caixa_outros as (
                     select coalesce(sum(case when kind='IN' then amount else 0 end),0) o
                       from resto.cashbook
@@ -3021,13 +3022,17 @@ def page_financeiro():
                   from resto.cashbook
                  where kind='IN' and entry_date between %s and %s
             """, (dre_ini, dre_fim))["s"] or 0)
+            
+            # aqui a mágica: transforma as saídas negativas em despesa positiva
             d = float(qone("""
-                select coalesce(sum(amount),0) s
+                select coalesce(sum(-amount),0) s
                   from resto.cashbook
                  where kind='OUT' and entry_date between %s and %s
             """, (dre_ini, dre_fim))["s"] or 0)
+            
             c = 0.0
             o = 0.0
+
 
         resultado = v + o - c - d
 
@@ -3035,7 +3040,7 @@ def page_financeiro():
         k1, k2, k3, k4 = st.columns(4)
         with k1: st.metric("Receita (vendas)",  money(v))
         with k2: st.metric("CMV",                money(c))
-        with k3: st.metric("Despesas (caixa)",  money(d))
+        with k3: st.metric("Despesas (caixa)", money(-d))  # exibe como negativo no topo
         with k4: st.metric("Resultado",         money(resultado))
 
         # Monta GRID (valores negativos para itens que subtraem)
