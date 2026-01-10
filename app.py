@@ -4317,6 +4317,7 @@ def page_relatorios():
                         pass
             return False
 
+    # PDF do relatório financeiro por categoria (já existente)
     def _build_pdf_bytes(dt_ini, dt_fim, df_show, tot_e, tot_s, tot_res) -> bytes:
         from reportlab.lib import colors
         from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
@@ -4324,11 +4325,15 @@ def page_relatorios():
         from reportlab.lib.pagesizes import A4, landscape
 
         buf = BytesIO()
-        doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=24, rightMargin=24, topMargin=18, bottomMargin=18)
+        doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
+                                leftMargin=24, rightMargin=24, topMargin=18, bottomMargin=18)
         styles = getSampleStyleSheet()
         story = []
 
-        titulo = Paragraph(f"<b>Relatório Financeiro</b> — {dt_ini:%d/%m/%Y} a {dt_fim:%d/%m/%Y}", styles['Title'])
+        titulo = Paragraph(
+            f"<b>Relatório Financeiro</b> — {dt_ini:%d/%m/%Y} a {dt_fim:%d/%m/%Y}",
+            styles['Title']
+        )
         story.append(titulo)
         story.append(Spacer(1, 8))
 
@@ -4339,13 +4344,13 @@ def page_relatorios():
         ]
         tot_tbl = Table(tot_data, colWidths=[220, 220, 220])
         tot_tbl.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#F0F0F0")),
-            ('TEXTCOLOR',  (0,0), (-1,0), colors.black),
-            ('ALIGN',      (0,0), (-1,-1), 'CENTER'),
-            ('FONTNAME',   (0,0), (-1,0), 'Helvetica-Bold'),
-            ('FONTSIZE',   (0,0), (-1,0), 10),
-            ('BOTTOMPADDING',(0,0),(-1,0), 8),
-            ('GRID',       (0,0), (-1,-1), 0.25, colors.grey),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#F0F0F0")),
+            ('TEXTCOLOR',  (0, 0), (-1, 0), colors.black),
+            ('ALIGN',      (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE',   (0, 0), (-1, 0), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID',       (0, 0), (-1, -1), 0.25, colors.grey),
         ]))
         story.append(tot_tbl)
         story.append(Spacer(1, 12))
@@ -4357,21 +4362,89 @@ def page_relatorios():
         ]
         tbl = Table(data, colWidths=[300, 150, 150, 150])
         tbl.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#E8EEF7")),
-            ('FONTNAME',   (0,0), (-1,0), 'Helvetica-Bold'),
-            ('ALIGN',      (1,1), (-1,-1), 'RIGHT'),
-            ('ALIGN',      (0,0), (0,-1), 'LEFT'),
-            ('GRID',       (0,0), (-1,-1), 0.25, colors.grey),
-            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor("#FAFAFA")]),
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
+            ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('ALIGN',      (1, 1), (-1, -1), 'RIGHT'),
+            ('ALIGN',      (0, 0), (0, -1), 'LEFT'),
+            ('GRID',       (0, 0), (-1, -1), 0.25, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#FAFAFA")]),
         ]))
         story.append(tbl)
 
         doc.build(story)
         return buf.getvalue()
 
-    header("📑 Relatórios", "Exportações oficiais (PDF/CSV).")
-    tabs = st.tabs(["💰 Financeiro"])
+    # PDF do COMPARATIVO (mensal/semestral/anual)
+    def _build_pdf_bytes_cmp(titulo: str, df_show: pd.DataFrame,
+                             tot_e: float, tot_s: float, tot_res: float) -> bytes:
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.pagesizes import A4, landscape
 
+        buf = BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
+                                leftMargin=24, rightMargin=24, topMargin=18, bottomMargin=18)
+        styles = getSampleStyleSheet()
+        story = []
+
+        story.append(Paragraph(f"<b>{titulo}</b>", styles['Title']))
+        story.append(Spacer(1, 8))
+
+        # Totais
+        tot_data = [
+            ["Entradas (período)", "Saídas (período)", "Resultado (E − S)"],
+            [_brl(tot_e), _brl(tot_s), _brl(tot_res)]
+        ]
+        tot_tbl = Table(tot_data, colWidths=[220, 220, 220])
+        tot_tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#F0F0F0")),
+            ('TEXTCOLOR',  (0, 0), (-1, 0), colors.black),
+            ('ALIGN',      (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE',   (0, 0), (-1, 0), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID',       (0, 0), (-1, -1), 0.25, colors.grey),
+        ]))
+        story.append(tot_tbl)
+        story.append(Spacer(1, 12))
+
+        # Detalhes por período (mês/ano)
+        first_col = df_show.columns[0]  # "periodo" ou "ano"
+        label_periodo = "Período" if str(first_col).lower() in ("periodo", "ano") else str(first_col)
+
+        data = [[label_periodo, "Entradas", "Saídas", "Saldo"]]
+        for _, r in df_show.iterrows():
+            data.append([
+                str(r[first_col]),
+                _brl(r["entradas"]),
+                _brl(r["saidas"]),
+                _brl(r["saldo"]),
+            ])
+
+        tbl = Table(data, colWidths=[180, 150, 150, 150])
+        tbl.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
+            ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('ALIGN',      (1, 1), (-1, -1), 'RIGHT'),
+            ('ALIGN',      (0, 0), (0, -1), 'LEFT'),
+            ('GRID',       (0, 0), (-1, -1), 0.25, colors.grey),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1),
+             [colors.white, colors.HexColor("#FAFAFA")]),
+        ]))
+        story.append(tbl)
+
+        doc.build(story)
+        return buf.getvalue()
+
+    # mesmos métodos de pagamento do Financeiro
+    METHODS = ['— todas —', 'dinheiro', 'pix', 'cartão débito',
+               'cartão crédito', 'boleto', 'transferência', 'outro']
+
+    header("📑 Relatórios", "Exportações oficiais (PDF/CSV).")
+    tabs = st.tabs(["💰 Financeiro", "📆 Comparativo"])
+
+    # -------------------- ABA 0: FINANCEIRO --------------------
     with tabs[0]:
         card_start()
         st.subheader("Financeiro — Exportação")
@@ -4414,12 +4487,10 @@ def page_relatorios():
         rows = qall(sql, tuple(pr)) or []
         df = pd.DataFrame(rows)
 
-        # Se houver dados, prepara os arquivos; senão, avisa
         if not df.empty:
             df["entradas"] = df["entradas_raw"].astype(float)
-            # garante saídas positivas (independe de como foi gravado)
-            df["saidas"] = df["saidas_raw"].astype(float).abs()
-            df["saldo"] = df["entradas"] - df["saidas"]
+            df["saidas"]   = df["saidas_raw"].astype(float).abs()
+            df["saldo"]    = df["entradas"] - df["saidas"]
             df_show = df[["categoria", "entradas", "saidas", "saldo"]].sort_values("categoria")
 
             tot_e = float(df_show["entradas"].sum())
@@ -4430,16 +4501,14 @@ def page_relatorios():
             csv_bytes = df_show.rename(columns={
                 "categoria": "Categoria",
                 "entradas": "Entradas",
-                "saidas": "Saídas",
-                "saldo": "Saldo"
+                "saidas":   "Saídas",
+                "saldo":    "Saldo"
             }).to_csv(index=False).encode("utf-8")
 
-            # PDF
             has_pdf = _ensure_reportlab_runtime()
             if has_pdf:
                 pdf_bytes = _build_pdf_bytes(dt_ini, dt_fim, df_show, tot_e, tot_s, tot_res)
 
-            # Botões de download (sem mostrar grid ou métricas)
             colb1, colb2 = st.columns(2)
             with colb1:
                 st.download_button(
@@ -4464,6 +4533,209 @@ def page_relatorios():
             st.info("Sem lançamentos para o período/filtro escolhido. Ajuste os filtros para habilitar os downloads.")
 
         card_end()
+
+    # -------------------- ABA 1: COMPARATIVO --------------------
+    with tabs[1]:
+        card_start()
+        st.subheader("📆 Comparativo — Entradas x Saídas")
+
+        colc1, colc2, colc3 = st.columns([1, 1, 2])
+        with colc1:
+            modo = st.selectbox(
+                "Período",
+                ["Mensal (12m)", "Semestral (6m)", "Anual (5a)"],
+                key="rel_cmp_modo"
+            )
+        with colc2:
+            method = st.selectbox("Método", METHODS, key="rel_cmp_method")
+        with colc3:
+            cats_all = qall("select id, name from resto.cash_category order by name;") or []
+            cat_opts = [(c["id"], c["name"]) for c in cats_all]
+            cmp_cats = st.multiselect(
+                "Categorias (opcional)",
+                options=cat_opts,
+                format_func=lambda x: x[1],
+                key="rel_cmp_cats"
+            )
+            cat_ids = [c[0] for c in cmp_cats] if cmp_cats else []
+
+        has_pdf = _ensure_reportlab_runtime()
+
+        # --------- MENSAL / SEMESTRAL ---------
+        if modo in ("Mensal (12m)", "Semestral (6m)"):
+            nmeses = 12 if "12" in modo else 6
+
+            wh_extra = []
+            params = []
+            if cat_ids:
+                wh_extra.append("cb.category_id = ANY(%s)")
+                params.append(cat_ids)
+            if method and method != '— todas —':
+                wh_extra.append("cb.method = %s")
+                params.append(method)
+
+            sql_cmp = f"""
+                with series as (
+                    select generate_series(
+                        date_trunc('month', current_date) - interval '{nmeses-1} months',
+                        date_trunc('month', current_date),
+                        interval '1 month'
+                    )::date as m
+                ),
+                agg as (
+                    select date_trunc('month', cb.entry_date)::date as m,
+                           sum(case when cb.kind='IN'  then cb.amount else 0 end)  as vin,
+                           sum(case when cb.kind='OUT' then cb.amount else 0 end)  as vout
+                      from resto.cashbook cb
+                     where cb.entry_date >= (select min(m) from series)
+                       and cb.entry_date <  (date_trunc('month', current_date) + interval '1 month')
+                       {(' and ' + ' and '.join(wh_extra)) if wh_extra else ''}
+                  group by 1
+                )
+                select to_char(s.m, 'YYYY-MM') as periodo,
+                       coalesce(a.vin,0)  as entradas_raw,
+                       coalesce(a.vout,0) as saidas_raw
+                  from series s
+                  left join agg a on a.m = s.m
+              order by s.m;
+            """
+            rows_cmp = qall(sql_cmp, tuple(params)) or []
+            dfc = pd.DataFrame(rows_cmp)
+
+            if not dfc.empty:
+                dfc["entradas"] = dfc["entradas_raw"].astype(float)
+                dfc["saidas"]   = dfc["saidas_raw"].astype(float).apply(lambda x: -x if x < 0 else x)
+                dfc["saldo"]    = dfc["entradas"] - dfc["saidas"]
+
+                show = dfc[["periodo", "entradas", "saidas", "saldo"]]
+                tot_e = float(show["entradas"].sum())
+                tot_s = float(show["saidas"].sum())
+                tot_res = float(show["saldo"].sum())
+
+                # CSV
+                csv_bytes = show.rename(columns={
+                    "periodo":  "Período",
+                    "entradas": "Entradas",
+                    "saidas":   "Saídas",
+                    "saldo":    "Saldo",
+                }).to_csv(index=False).encode("utf-8")
+
+                pdf_bytes = None
+                if has_pdf:
+                    ini = str(show["periodo"].iloc[0])
+                    fim = str(show["periodo"].iloc[-1])
+                    tipo = "Mensal (12m)" if "Mensal" in modo else "Semestral (6m)"
+                    titulo = f"Relatório Comparativo — {tipo} ({ini} a {fim})"
+                    pdf_bytes = _build_pdf_bytes_cmp(titulo, show, tot_e, tot_s, tot_res)
+
+                colb1, colb2 = st.columns(2)
+                with colb1:
+                    st.download_button(
+                        "⬇️ Baixar CSV (Comparativo Mensal/Semestral)",
+                        data=csv_bytes,
+                        file_name="relatorio_comparativo_mensal.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                with colb2:
+                    if has_pdf and pdf_bytes is not None:
+                        st.download_button(
+                            "📄 Baixar PDF (Comparativo)",
+                            data=pdf_bytes,
+                            file_name="relatorio_comparativo_mensal.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+            else:
+                st.info("Sem dados para montar o comparativo com os filtros atuais.")
+
+        # --------- ANUAL (5 anos) ---------
+        else:
+            wh_extra = []
+            params = []
+            if cat_ids:
+                wh_extra.append("cb.category_id = ANY(%s)")
+                params.append(cat_ids)
+            if method and method != '— todas —':
+                wh_extra.append("cb.method = %s")
+                params.append(method)
+
+            sql_cmp_y = f"""
+                with series as (
+                    select generate_series(
+                        date_trunc('year', current_date) - interval '4 years',
+                        date_trunc('year', current_date),
+                        interval '1 year'
+                    )::date as y
+                ),
+                agg as (
+                    select date_trunc('year', cb.entry_date)::date as y,
+                           sum(case when cb.kind='IN'  then cb.amount else 0 end)  as vin,
+                           sum(case when cb.kind='OUT' then cb.amount else 0 end)  as vout
+                      from resto.cashbook cb
+                     where cb.entry_date >= (date_trunc('year', current_date) - interval '4 years')
+                       and cb.entry_date <  (date_trunc('year', current_date) + interval '1 year')
+                       {(' and ' + ' and '.join(wh_extra)) if wh_extra else ''}
+                  group by 1
+                )
+                select to_char(s.y, 'YYYY') as ano,
+                       coalesce(a.vin,0)  as entradas_raw,
+                       coalesce(a.vout,0) as saidas_raw
+                  from series s
+                  left join agg a on a.y = s.y
+              order by s.y;
+            """
+            rows_cmp_y = qall(sql_cmp_y, tuple(params)) or []
+            dfy = pd.DataFrame(rows_cmp_y)
+
+            if not dfy.empty:
+                dfy["entradas"] = dfy["entradas_raw"].astype(float)
+                dfy["saidas"]   = dfy["saidas_raw"].astype(float).apply(lambda x: -x if x < 0 else x)
+                dfy["saldo"]    = dfy["entradas"] - dfy["saidas"]
+
+                show_y = dfy[["ano", "entradas", "saidas", "saldo"]]
+                tot_e = float(show_y["entradas"].sum())
+                tot_s = float(show_y["saidas"].sum())
+                tot_res = float(show_y["saldo"].sum())
+
+                # CSV
+                csv_bytes = show_y.rename(columns={
+                    "ano":      "Ano",
+                    "entradas": "Entradas",
+                    "saidas":   "Saídas",
+                    "saldo":    "Saldo",
+                }).to_csv(index=False).encode("utf-8")
+
+                pdf_bytes = None
+                if has_pdf:
+                    ano_ini = str(show_y["ano"].iloc[0])
+                    ano_fim = str(show_y["ano"].iloc[-1])
+                    titulo = f"Relatório Comparativo — Anual ({ano_ini} a {ano_fim})"
+                    pdf_bytes = _build_pdf_bytes_cmp(titulo, show_y, tot_e, tot_s, tot_res)
+
+                colb1, colb2 = st.columns(2)
+                with colb1:
+                    st.download_button(
+                        "⬇️ Baixar CSV (Comparativo Anual)",
+                        data=csv_bytes,
+                        file_name="relatorio_comparativo_anual.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                with colb2:
+                    if has_pdf and pdf_bytes is not None:
+                        st.download_button(
+                            "📄 Baixar PDF (Comparativo Anual)",
+                            data=pdf_bytes,
+                            file_name="relatorio_comparativo_anual.pdf",
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+            else:
+                st.info("Sem dados para montar o comparativo anual com os filtros atuais.")
+
+        card_end()
+
 #===================================================CANCELAR PRODUÇÃO=====================================================================
 def page_producao_cancelar():
     import pandas as pd
