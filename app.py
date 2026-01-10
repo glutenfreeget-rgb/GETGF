@@ -3335,111 +3335,6 @@ def page_financeiro():
         card_end()
 
     # ---------- Aba: 📆 Comparativo ----------
-                # === Helpers para gerar PDF do Comparativo ===
-                from io import BytesIO
-            
-                def _brl_cmp(v) -> str:
-                    try:
-                        v = float(v or 0)
-                    except Exception:
-                        v = 0.0
-                    s = f"R$ {v:,.2f}"
-                    return s.replace(",", "X").replace(".", ",").replace("X", ".")
-            
-                def _ensure_reportlab_runtime_cmp() -> bool:
-                    """
-                    Garante que o pacote reportlab está instalado.
-                    Se não estiver, só avisa (não quebra o app).
-                    """
-                    try:
-                        import reportlab  # noqa
-                        return True
-                    except Exception:
-                        st.info(
-                            "📄 Para exportar o comparativo em PDF, "
-                            "instale o pacote `reportlab` no servidor (pip install reportlab)."
-                        )
-                        return False
-            
-                def _build_pdf_bytes_cmp(titulo: str, df_show: pd.DataFrame,
-                                         total_e: float, total_s: float, total_res: float) -> bytes:
-                    """
-                    Gera um PDF simples com:
-                      - título
-                      - quadro de totais
-                      - tabela detalhada (período x valores)
-                    """
-                    from reportlab.lib import colors
-                    from reportlab.platypus import (
-                        SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-                    )
-                    from reportlab.lib.styles import getSampleStyleSheet
-                    from reportlab.lib.pagesizes import A4, landscape
-            
-                    buf = BytesIO()
-                    doc = SimpleDocTemplate(
-                        buf,
-                        pagesize=landscape(A4),
-                        leftMargin=24,
-                        rightMargin=24,
-                        topMargin=18,
-                        bottomMargin=18,
-                    )
-            
-                    styles = getSampleStyleSheet()
-                    story = []
-            
-                    # Título
-                    story.append(Paragraph(f"<b>{titulo}</b>", styles["Title"]))
-                    story.append(Spacer(1, 8))
-            
-                    # Totais
-                    dados_totais = [
-                        ["Entradas", "Saídas", "Resultado (E − S)"],
-                        [_brl_cmp(total_e), _brl_cmp(total_s), _brl_cmp(total_res)],
-                    ]
-                    tbl_tot = Table(dados_totais, colWidths=[200, 200, 200])
-                    tbl_tot.setStyle(TableStyle([
-                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
-                        ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
-                        ('ALIGN',      (0, 0), (-1, 0), 'CENTER'),
-                        ('ALIGN',      (1, 1), (-1, -1), 'RIGHT'),
-                        ('GRID',       (0, 0), (-1, -1), 0.25, colors.grey),
-                    ]))
-                    story.append(tbl_tot)
-                    story.append(Spacer(1, 12))
-            
-                    # Detalhes por período
-                    if df_show is not None and not df_show.empty:
-                        col_periodo = df_show.columns[0]   # "periodo" ou "ano"
-                        dados = [[str(col_periodo).capitalize(), "Entradas", "Saídas", "Saldo"]]
-                        for _, linha in df_show.iterrows():
-                            dados.append([
-                                str(linha[col_periodo]),
-                                _brl_cmp(linha["entradas"]),
-                                _brl_cmp(linha["saidas"]),
-                                _brl_cmp(linha["saldo"]),
-                            ])
-            
-                        tbl = Table(dados, colWidths=[160, 120, 120, 120])
-                        tbl.setStyle(TableStyle([
-                            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
-                            ('FONTNAME',   (0, 0), (-1, 0), 'Helvetica-Bold'),
-                            ('ALIGN',      (1, 1), (-1, -1), 'RIGHT'),
-                            ('ALIGN',      (0, 0), (0, -1), 'LEFT'),
-                            ('GRID',       (0, 0), (-1, -1), 0.25, colors.grey),
-                            ('ROWBACKGROUNDS', (0, 1), (-1, -1),
-                             [colors.white, colors.HexColor("#FAFAFA")]),
-                        ]))
-                        story.append(tbl)
-            
-                    doc.build(story)
-                    pdf_bytes = buf.getvalue()
-                    buf.close()
-                    return pdf_bytes
-
-    
-    # ---------- Aba: 📆 Comparativo ----------
     with tabs[5]:
         card_start()
         st.subheader("📆 Comparativo (Mensal / Semestral / Anual)")
@@ -3455,7 +3350,6 @@ def page_financeiro():
             cmp_cats = st.multiselect("Categorias (opcional)", options=cat_opts, format_func=lambda x: x[1], key="cmp_cats")
             cat_ids = [c[0] for c in cmp_cats] if cmp_cats else []
 
-        # ----------------- MENSAL / SEMESTRAL -----------------
         if modo in ("Mensal (12m)", "Semestral (6m)"):
             nmeses = 12 if "12" in modo else 6
 
@@ -3511,37 +3405,12 @@ def page_financeiro():
                 st.dataframe(show, use_container_width=True, hide_index=True)
                 st.bar_chart(show.set_index("periodo")[["entradas","saidas"]], use_container_width=True)
 
-                # ---- CSV + PDF ----
                 csv = show.to_csv(index=False).encode("utf-8")
-
-                has_pdf = _ensure_reportlab_runtime_cmp()
-                pdf_bytes = None
-                if has_pdf:
-                    ini = str(show["periodo"].iloc[0])
-                    fim = str(show["periodo"].iloc[-1])
-                    tipo = "Mensal (12m)" if "Mensal" in modo else "Semestral (6m)"
-                    titulo = f"Comparativo Financeiro – {tipo} ({ini} a {fim})"
-                    tot_e = float(show["entradas"].sum())
-                    tot_s = float(show["saidas"].sum())
-                    tot_res = float(show["saldo"].sum())
-                    pdf_bytes = _build_pdf_bytes_cmp(titulo, show, tot_e, tot_s, tot_res)
-
-                bc1, bc2 = st.columns(2)
-                with bc1:
-                    st.download_button("⬇️ Exportar CSV (Comparativo Mensal/Semestral)",
-                                       data=csv,
-                                       file_name="comparativo_mensal.csv",
-                                       mime="text/csv")
-                with bc2:
-                    if has_pdf and pdf_bytes:
-                        st.download_button("📄 Exportar PDF (Comparativo)",
-                                           data=pdf_bytes,
-                                           file_name="comparativo_mensal.pdf",
-                                           mime="application/pdf")
+                st.download_button("⬇️ Exportar CSV (Comparativo Mensal/Semestral)", data=csv,
+                                   file_name="comparativo_mensal.csv", mime="text/csv")
             else:
                 st.caption("Sem lançamentos no período/critério selecionado.")
 
-        # ----------------- ANUAL (5 anos) -----------------
         else:
             wh_extra = []
             params = []
@@ -3595,37 +3464,13 @@ def page_financeiro():
                 st.dataframe(show_y, use_container_width=True, hide_index=True)
                 st.bar_chart(show_y.set_index("ano")[["entradas","saidas"]], use_container_width=True)
 
-                # ---- CSV + PDF ----
                 csv = show_y.to_csv(index=False).encode("utf-8")
-
-                has_pdf = _ensure_reportlab_runtime_cmp()
-                pdf_bytes = None
-                if has_pdf:
-                    ano_ini = str(show_y["ano"].iloc[0])
-                    ano_fim = str(show_y["ano"].iloc[-1])
-                    titulo = f"Comparativo Financeiro – Anual ({ano_ini} a {ano_fim})"
-                    tot_e = float(show_y["entradas"].sum())
-                    tot_s = float(show_y["saidas"].sum())
-                    tot_res = float(show_y["saldo"].sum())
-                    pdf_bytes = _build_pdf_bytes_cmp(titulo, show_y, tot_e, tot_s, tot_res)
-
-                bc1, bc2 = st.columns(2)
-                with bc1:
-                    st.download_button("⬇️ Exportar CSV (Comparativo Anual)",
-                                       data=csv,
-                                       file_name="comparativo_anual.csv",
-                                       mime="text/csv")
-                with bc2:
-                    if has_pdf and pdf_bytes:
-                        st.download_button("📄 Exportar PDF (Comparativo Anual)",
-                                           data=pdf_bytes,
-                                           file_name="comparativo_anual.pdf",
-                                           mime="application/pdf")
+                st.download_button("⬇️ Exportar CSV (Comparativo Anual)", data=csv,
+                                   file_name="comparativo_anual.csv", mime="text/csv")
             else:
                 st.caption("Sem lançamentos no período/critério selecionado.")
 
         card_end()
-
 
     # ---------- Aba: 🧾 A Pagar (NOVO, sem mexer nas outras abas) ----------
     with tabs[6]:
